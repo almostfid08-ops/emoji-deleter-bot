@@ -15,7 +15,7 @@ from telegram.ext import (
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# المشرفين الأساسيين (الذين أرسلتهم)
+# المشرفين الأساسيين
 INITIAL_ADMINS = [1611988598, 7065061464]
 
 DATA_FILE = "bot_data.json"
@@ -26,13 +26,12 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# === 1. إدارة قاعدة البيانات (المجموعات، المشرفين، الإيموجيات، الكلمات) ===
+# === 1. إدارة قاعدة البيانات ===
 def load_data():
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # دمج المشرفين الأوليين دائماً
                 for admin in INITIAL_ADMINS:
                     if admin not in data.get("admins", []):
                         data.setdefault("admins", []).append(admin)
@@ -40,7 +39,7 @@ def load_data():
         except Exception:
             pass
     return {
-        "groups": {}, # {chat_id_str: chat_title}
+        "groups": {},
         "admins": INITIAL_ADMINS,
         "emojis": ["😂", "🤣", "💩"],
         "words": []
@@ -74,28 +73,33 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# === 3. لوحة تحكم المشرفين ===
-def get_admin_keyboard():
+# === 3. لوحات التحكم والأزرار ===
+def get_main_admin_keyboard():
     keyboard = [
         [InlineKeyboardButton("📢 إذاعة عامة لكل المجموعات", callback_data="bc_all")],
         [InlineKeyboardButton("🎯 إذاعة لمجموعة محددة", callback_data="bc_single_select")],
         [InlineKeyboardButton("👤 إضافة مشرف جديد", callback_data="add_admin")],
-        [InlineKeyboardButton("⛔ إدارة الكلمات المحظورة", callback_data="manage_words"),
-         InlineKeyboardButton("😀 إدارة الإيموجيات المحظورة", callback_data="manage_emojis")]
+        [InlineKeyboardButton("⛔ الكلمات المحظورة", callback_data="manage_words"),
+         InlineKeyboardButton("😀 الإيموجيات المحظورة", callback_data="manage_emojis")]
     ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_back_keyboard():
+    keyboard = [[InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="main_menu")]]
     return InlineKeyboardMarkup(keyboard)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if is_admin(user_id):
+        WAITING_STATES[user_id] = None
         await update.message.reply_text(
             "أهلاً بك يا أدمن في لوحة التحكم الإدارية! 🛠️\nاختر من الأزرار أدناه للتحكم بالبوت:",
-            reply_markup=get_admin_keyboard()
+            reply_markup=get_main_admin_keyboard()
         )
     else:
         await update.message.reply_text("مرحباً بك! هذا البوت مخصص لإدارة وحماية المجموعات تلقائياً.")
 
-# === 4. الاستجابة للأزرار الشفافة ===
+# === 4. الاستجابة للأزرار الشفافة والرجوع ===
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -107,34 +111,47 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data_action = query.data
 
-    # إذاعة عامة
-    if data_action == "bc_all":
-        WAITING_STATES[user_id] = "bc_all"
-        await query.message.reply_text("📝 **أرسل الآن المنشور أو الرسالة لإذاعتها لجميع المجموعات:**", parse_mode='Markdown')
+    # الرجوع للقائمة الرئيسية
+    if data_action == "main_menu":
+        WAITING_STATES[user_id] = None
+        await query.message.edit_text(
+            "أهلاً بك يا أدمن في لوحة التحكم الإدارية! 🛠️\nاختر من الأزرار أدناه للتحكم بالبوت:",
+            reply_markup=get_main_admin_keyboard()
+        )
 
-    # اختيار مجموعة محددة للإذاعة
+    # إذاعة عامة
+    elif data_action == "bc_all":
+        WAITING_STATES[user_id] = "bc_all"
+        await query.message.edit_text(
+            "📝 **أرسل الآن المنشور أو الرسالة لإذاعتها لجميع المجموعات:**",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard()
+        )
+
+    # اختيار مجموعة محددة
     elif data_action == "bc_single_select":
         bot_data = load_data()
         groups = bot_data.get("groups", {})
         if not groups:
-            await query.message.reply_text("❌ لا توجد مجموعات مسجلة حالياً.")
+            await query.message.edit_text("❌ لا توجد مجموعات مسجلة حالياً.", reply_markup=get_back_keyboard())
             return
 
         keyboard = []
         for g_id, g_title in groups.items():
             keyboard.append([InlineKeyboardButton(f"👥 {g_title}", callback_data=f"bc_to_{g_id}")])
-        
-        await query.message.reply_text("🎯 **اختر المجموعة التي تريد إرسال الإذاعة لها:**", reply_markup=InlineKeyboardMarkup(keyboard))
+        keyboard.append([InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="main_menu")])
+
+        await query.message.edit_text("🎯 **اختر المجموعة التي تريد إرسال الإذاعة لها:**", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data_action.startswith("bc_to_"):
         target_group_id = data_action.replace("bc_to_", "")
         WAITING_STATES[user_id] = f"bc_single_{target_group_id}"
-        await query.message.reply_text("📝 **أرسل الآن الرسالة المراد توجيهها لهذه المجموعة:**")
+        await query.message.edit_text("📝 **أرسل الآن الرسالة المراد توجيهها لهذه المجموعة:**", reply_markup=get_back_keyboard())
 
-    # إضافة مشرف جديد
+    # إضافة مشرف
     elif data_action == "add_admin":
         WAITING_STATES[user_id] = "add_admin"
-        await query.message.reply_text("👤 **أرسل الآن المعرف (Telegram ID) الخاص بالمشرف الجديد:**\n(مثال: 123456789)")
+        await query.message.edit_text("👤 **أرسل الآن المعرف (Telegram ID) الخاص بالمشرف الجديد:**\n(مثال: 123456789)", reply_markup=get_back_keyboard())
 
     # إدارة الكلمات المحظورة
     elif data_action == "manage_words":
@@ -144,19 +161,20 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = [
             [InlineKeyboardButton("➕ إضافة كلمة محظورة", callback_data="add_word")],
-            [InlineKeyboardButton("🗑️ مسح جميع الكلمات", callback_data="clear_words")]
+            [InlineKeyboardButton("🗑️ مسح جميع الكلمات", callback_data="clear_words")],
+            [InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="main_menu")]
         ]
-        await query.message.reply_text(f"⛔ **الكلمات المحظورة حالياً:**\n\n`{words_text}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.edit_text(f"⛔ **الكلمات المحظورة حالياً:**\n\n`{words_text}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data_action == "add_word":
         WAITING_STATES[user_id] = "add_word"
-        await query.message.reply_text("✏️ **أرسل الكلمة الجديدة المراد حظرها:**")
+        await query.message.edit_text("✏️ **أرسل الكلمة الجديدة المراد حظرها:**", reply_markup=get_back_keyboard())
 
     elif data_action == "clear_words":
         bot_data = load_data()
         bot_data["words"] = []
         save_data(bot_data)
-        await query.message.reply_text("✅ تم تفريغ قائمة الكلمات المحظورة بنجاح.")
+        await query.message.edit_text("✅ تم تفريغ قائمة الكلمات المحظورة بنجاح.", reply_markup=get_back_keyboard())
 
     # إدارة الإيموجيات المحظورة
     elif data_action == "manage_emojis":
@@ -166,21 +184,22 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = [
             [InlineKeyboardButton("➕ إضافة إيموجي محظور", callback_data="add_emoji")],
-            [InlineKeyboardButton("🗑️ مسح جميع الإيموجيات", callback_data="clear_emojis")]
+            [InlineKeyboardButton("🗑️ مسح جميع الإيموجيات", callback_data="clear_emojis")],
+            [InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="main_menu")]
         ]
-        await query.message.reply_text(f"😀 **الإيموجيات المحظورة حالياً:**\n\n{emojis_text}", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.edit_text(f"😀 **الإيموجيات المحظورة حالياً:**\n\n{emojis_text}", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data_action == "add_emoji":
         WAITING_STATES[user_id] = "add_emoji"
-        await query.message.reply_text("✏️ **أرسل الإيموجي الجديد المراد حظره:**")
+        await query.message.edit_text("✏️ **أرسل الإيموجي الجديد المراد حظره:**", reply_markup=get_back_keyboard())
 
     elif data_action == "clear_emojis":
         bot_data = load_data()
         bot_data["emojis"] = []
         save_data(bot_data)
-        await query.message.reply_text("✅ تم تفريغ قائمة الإيموجيات المحظورة بنجاح.")
+        await query.message.edit_text("✅ تم تفريغ قائمة الإيموجيات المحظورة بنجاح.", reply_markup=get_back_keyboard())
 
-# === 5. معالجة النصوص الواردة في الخاص (إدخال البيانات والرسائل) ===
+# === 5. معالجة النصوص الواردة في الخاص ===
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -191,7 +210,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
 
     state = WAITING_STATES.get(user_id)
     if not state:
-        await update.message.reply_text("يرجى استخدام الأوامر عبر القائمة من /start")
+        await update.message.reply_text("يرجى استخدام الأوامر عبر القائمة من /start", reply_markup=get_main_admin_keyboard())
         return
 
     bot_data = load_data()
@@ -209,7 +228,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 await asyncio.sleep(0.1)
             except Exception:
                 failed += 1
-        await status_msg.edit_text(f"✅ تمت الإذاعة العامة!\n- نجاح: {sent}\n- فشل: {failed}")
+        await status_msg.edit_text(f"✅ تمت الإذاعة العامة!\n- نجاح: {sent}\n- فشل: {failed}", reply_markup=get_back_keyboard())
 
     # إذاعة لمجموعة واحدة
     elif state.startswith("bc_single_"):
@@ -217,9 +236,9 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         target_g_id = state.replace("bc_single_", "")
         try:
             await update.message.copy(chat_id=int(target_g_id))
-            await update.message.reply_text("✅ تم إرسال المنشور للمجموعة المحددة بنجاح!")
+            await update.message.reply_text("✅ تم إرسال المنشور للمجموعة المحددة بنجاح!", reply_markup=get_back_keyboard())
         except Exception as e:
-            await update.message.reply_text(f"❌ فشل الإرسال للمجموعة: {e}")
+            await update.message.reply_text(f"❌ فشل الإرسال للمجموعة: {e}", reply_markup=get_back_keyboard())
 
     # إضافة مشرف
     elif state == "add_admin":
@@ -229,11 +248,11 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             if new_admin_id not in bot_data["admins"]:
                 bot_data["admins"].append(new_admin_id)
                 save_data(bot_data)
-                await update.message.reply_text(f"✅ تم منح صلاحيات المشرف للـ ID: `{new_admin_id}` بنجاح!", parse_mode='Markdown')
+                await update.message.reply_text(f"✅ تم منح صلاحيات المشرف للـ ID: `{new_admin_id}` بنجاح!", parse_mode='Markdown', reply_markup=get_back_keyboard())
             else:
-                await update.message.reply_text("⚠️ هذا المستخدم أدمن بالفعل.")
+                await update.message.reply_text("⚠️ هذا المستخدم أدمن بالفعل.", reply_markup=get_back_keyboard())
         except ValueError:
-            await update.message.reply_text("❌ خطأ، يرجى إرسال أرقام الـ ID فقط.")
+            await update.message.reply_text("❌ خطأ، يرجى إرسال أرقام الـ ID فقط.", reply_markup=get_back_keyboard())
 
     # إضافة كلمة
     elif state == "add_word":
@@ -242,7 +261,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         if new_word not in bot_data["words"]:
             bot_data["words"].append(new_word)
             save_data(bot_data)
-            await update.message.reply_text(f"✅ تم إضافة الكلمة `{new_word}` إلى قائمة الحظر!", parse_mode='Markdown')
+            await update.message.reply_text(f"✅ تم إضافة الكلمة `{new_word}` إلى قائمة الحظر!", parse_mode='Markdown', reply_markup=get_back_keyboard())
 
     # إضافة إيموجي
     elif state == "add_emoji":
@@ -251,14 +270,13 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         if new_emoji not in bot_data["emojis"]:
             bot_data["emojis"].append(new_emoji)
             save_data(bot_data)
-            await update.message.reply_text(f"✅ تم إضافة الإيموجي {new_emoji} إلى قائمة الحظر!")
+            await update.message.reply_text(f"✅ تم إضافة الإيموجي {new_emoji} إلى قائمة الحظر!", reply_markup=get_back_keyboard())
 
-# === 6. حماية المجموعات (حذف الكلمات والإيموجيات) ===
+# === 6. حماية المجموعات ===
 async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat:
         return
 
-    # حفظ المجموعة باسمها
     register_group(update.effective_chat.id, update.effective_chat.title or "مجموعة")
 
     if not update.message.text:
@@ -276,14 +294,12 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_violating = False
     reason = ""
 
-    # فحص الإيموجي
     for emoji in forbidden_emojis:
         if emoji in text:
             is_violating = True
             reason = "إيموجي ممنوع"
             break
 
-    # فحص الكلمات
     if not is_violating:
         for word in forbidden_words:
             if word in text_lower:
@@ -313,15 +329,12 @@ async def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # الخاص والمشرفين
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(button_click))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND), handle_private_message))
-
-    # المجموعات
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, group_filter))
 
-    print("البوت المتطور يعمل بنجاح...")
+    print("البوت يعمل بنجاح مع زر الرجوع...")
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
