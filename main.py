@@ -75,7 +75,7 @@ def register_group(chat_id, title):
         data["groups"][chat_id_str] = title
         save_data(data)
 
-# === 2. سيرفر الويب ===
+# === 2. سيرفر الويب لإبقاء البوت نشطاً ===
 async def handle_ping(request):
     return web.Response(text="Bot is awake and running!")
 
@@ -156,20 +156,18 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         WAITING_STATES[user_id] = None
         await query.message.edit_text("أهلاً بك في لوحة التحكم الإدارية! 🛠️", reply_markup=get_main_admin_keyboard())
 
-    # --- دليل الأوامر ---
     elif action == "show_cmd_help":
         help_text = (
             "📖 **دليل أوامر الإشراف السريعة للمجموعات:**\n\n"
-            "يمكنك استخدام هذه الأوامر مباشرة داخل المجموعة (بالرد على الرسالة أو بكتابة الـ Tag):\n\n"
-            "• `/حظر` أو `/حظر @username` : حظر المستخدم نهائياً.\n"
-            "• `/حظر 10m` أو `/حظر 2h` : حظر مؤقت (مثال: m للدقائق، h للساعات، d للأيام).\n"
-            "• `/كتم` أو `/كتم 30m` : كتم المستخدم لمنعه من إرسال الرسائل.\n"
-            "• `/الغاء_الحظر @username` : إزالة الحظر عن المستخدم.\n"
-            "• `/الغاء_الكتم @username` : السماح للمستخدم بالكتابة مجدداً."
+            "يمكنك استخدام هذه الأوامر مباشرة داخل المجموعة (بالرد على الرسالة):\n\n"
+            "• `/حظر` : حظر المستخدم نهائياً.\n"
+            "• `/حظر 10m` أو `/حظر 2h` : حظر مؤقت.\n"
+            "• `/كتم` أو `/كتم 30m` : كتم المستخدم.\n"
+            "• `/الغاء_الحظر` : إزالة الحظر عن المستخدم بالرد عليه.\n"
+            "• `/الغاء_الكتم` : السماح للمستخدم بالكتابة مجدداً بالرد عليه."
         )
         await query.message.edit_text(help_text, parse_mode='Markdown', reply_markup=get_back_keyboard())
 
-    # --- إدارة الوضع الصامت ---
     elif action == "manage_silent":
         s = bot_data.get("silent_mode", {})
         msg = (
@@ -196,7 +194,6 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_data(bot_data)
         
         custom_msg = bot_data["silent_mode"].get("custom_message", "")
-        # إرسال التنبيه للمجموعات
         groups = bot_data.get("groups", {})
         for g_id in groups.keys():
             try:
@@ -220,7 +217,6 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         WAITING_STATES[user_id] = "set_silent_msg"
         await query.message.edit_text("✏️ **أرسل الرسالة التوضيحية الجديدة للوضع الصامت:**", reply_markup=get_back_keyboard("manage_silent"))
 
-    # --- الإذاعة ---
     elif action == "bc_all":
         WAITING_STATES[user_id] = "bc_all"
         await query.message.edit_text("📝 **أرسل الآن منشور الإذاعة العامة:**", reply_markup=get_back_keyboard())
@@ -239,7 +235,6 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         WAITING_STATES[user_id] = f"bc_single_{target_g_id}"
         await query.message.edit_text("📝 **أرسل منشور الإذاعة للمجموعة المحددة:**", reply_markup=get_back_keyboard())
 
-    # --- إدارة المشرفين والكلمات والإيموجي ---
     elif action == "add_admin":
         WAITING_STATES[user_id] = "add_admin"
         await query.message.edit_text("👤 **أرسل ID المشرف الجديد:**", reply_markup=get_back_keyboard())
@@ -383,7 +378,6 @@ async def admin_actions_handler(update: Update, context: ContextTypes.DEFAULT_TY
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
 
-    # التحقق من صلاحيات المشرف
     if not await is_group_admin(context, chat_id, user_id):
         return
 
@@ -393,15 +387,10 @@ async def admin_actions_handler(update: Update, context: ContextTypes.DEFAULT_TY
     target_user_id = None
     target_user_name = "المستخدم"
 
-    # تحديد الهدف عبر الرد أو المعرف
     if update.message.reply_to_message:
         target_user_id = update.message.reply_to_message.from_user.id
         target_user_name = update.message.reply_to_message.from_user.first_name
-    elif len(context.args) > 0 and context.args[0].startswith("@"):
-        # محاولة إيجاد المستخدم عبر المعرف ليست متتاحة مباشرة بدون ID إلا إذا كان مسجلاً، سنتحقق من المدخلات
-        pass
 
-    # --- أمر الحظر ---
     if cmd in ["/حظر", "/ban"]:
         if not target_user_id:
             await update.message.reply_text("❌ يرجى الرد على رسالة المستخدم للقيام بالحظر.")
@@ -422,7 +411,6 @@ async def admin_actions_handler(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             await update.message.reply_text(f"❌ فشل الحظر: {e}")
 
-    # --- أمر الكتم ---
     elif cmd in ["/كتم", "/mute"]:
         if not target_user_id:
             await update.message.reply_text("❌ يرجى الرد على رسالة المستخدم للقيام بالكتم.")
@@ -444,7 +432,6 @@ async def admin_actions_handler(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             await update.message.reply_text(f"❌ فشل الكتم: {e}")
 
-    # --- إلغاء الحظر ---
     elif cmd in ["/الغاء_الحظر", "/unban"]:
         if not target_user_id:
             await update.message.reply_text("❌ يرجى الرد على رسالة المستخدم لإلغاء الحظر.")
@@ -456,7 +443,6 @@ async def admin_actions_handler(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             await update.message.reply_text(f"❌ فشل إلغاء الحظر: {e}")
 
-    # --- إلغاء الكتم ---
     elif cmd in ["/الغاء_الكتم", "/unmute"]:
         if not target_user_id:
             await update.message.reply_text("❌ يرجى الرد على رسالة المستخدم لإلغاء الكتم.")
@@ -469,7 +455,7 @@ async def admin_actions_handler(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             await update.message.reply_text(f"❌ فشل إلغاء الكتم: {e}")
 
-# === 7. فلتر المجموعات (الكلمات، الإيموجيات، والوضع الصامت) ===
+# === 7. فلتر المجموعات (مع استثناء حماية منشورات القناة المربوطة) ===
 def is_silent_active(bot_data):
     s = bot_data.get("silent_mode", {})
     if not s.get("enabled"):
@@ -477,7 +463,6 @@ def is_silent_active(bot_data):
 
     now = datetime.now()
 
-    # فحص المدة المؤقتة
     until_ts = s.get("until_timestamp", 0)
     if until_ts > 0:
         if now.timestamp() < until_ts:
@@ -486,7 +471,6 @@ def is_silent_active(bot_data):
             bot_data["silent_mode"]["until_timestamp"] = 0
             save_data(bot_data)
 
-    # فحص الوقت اليومي
     start_str = s.get("start_time", "22:00")
     end_str = s.get("end_time", "07:00")
 
@@ -499,7 +483,7 @@ def is_silent_active(bot_data):
 
         if start_time < end_time:
             return start_time <= now <= end_time
-        else: # التوقيت يعبر منتصف الليل
+        else:
             return now >= start_time or now <= end_time
     except Exception:
         return False
@@ -508,29 +492,37 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat:
         return
 
+    msg = update.message
+
+    # ⭐ استثناء القناة المربوطة والمنشورات المرسلة باسم القناة ⭐
+    if msg.is_automatic_forward or (msg.sender_chat and msg.sender_chat.type == "channel"):
+        return
+
     chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
+    user_id = update.effective_user.id if update.effective_user else None
     register_group(chat_id, update.effective_chat.title or "مجموعة")
 
     bot_data = load_data()
 
     # فحص الوضع الصامت
     if is_silent_active(bot_data):
-        if not await is_group_admin(context, chat_id, user_id):
+        if user_id and not await is_group_admin(context, chat_id, user_id):
             try:
-                await update.message.delete()
+                await msg.delete()
                 custom_msg = bot_data["silent_mode"].get("custom_message", "🔇 الوضع الصامت مفعل حالياً!")
-                warn = await context.bot.send_message(chat_id=chat_id, text=f"عذراً يا {update.effective_user.first_name}:\n{custom_msg}")
+                first_name = update.effective_user.first_name if update.effective_user else "العضو"
+                warn = await context.bot.send_message(chat_id=chat_id, text=f"عذراً يا {first_name}:\n{custom_msg}")
                 await asyncio.sleep(5)
                 await warn.delete()
             except Exception:
                 pass
             return
 
-    if not update.message.text:
+    # فحص الكلمات والإيموجي الممنوعة
+    text = msg.text or msg.caption
+    if not text:
         return
 
-    text = update.message.text
     text_lower = text.lower()
     first_name = update.effective_user.first_name if update.effective_user else "المستخدم"
 
@@ -555,7 +547,7 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_violating:
         try:
-            await update.message.delete()
+            await msg.delete()
             warning_msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"عذراً يا {first_name}، يمنع استخدام ({reason}) في المجموعة!"
@@ -565,7 +557,7 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-# === 8. التشغيل ===
+# === 8. تشغيل البوت ===
 async def main():
     if not BOT_TOKEN:
         print("خطأ: لم يتم ضبط BOT_TOKEN!")
@@ -579,13 +571,11 @@ async def main():
     app.add_handler(CallbackQueryHandler(button_click))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND), handle_private_message))
 
-    # أوامر الإشراف في المجموعة
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.Regex(r"^/(حظر|كتم|الغاء_الحظر|الغاء_الكتم|ban|mute|unban|unmute)"), admin_actions_handler))
 
-    # فلتر المجموعات الشامل
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, group_filter))
 
-    print("البوت المتكامل يعمل الآن بنجاح...")
+    print("البوت يعمل بنجاح...")
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
