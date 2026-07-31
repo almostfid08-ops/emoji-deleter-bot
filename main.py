@@ -97,24 +97,48 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# === 3. تحليل أزرار الروابط ===
+# === 3. تحليل أزرار الروابط الملونة ===
 def parse_button_markup(text):
     keyboard = []
     lines = text.strip().split("\n")
+    
+    style_map = {
+        "green": "success",
+        "blue": "primary",
+        "red": "danger"
+    }
+
     for line in lines:
         row = []
         btn_parts = line.split("|")
         for part in btn_parts:
-            # استخراج النص والربط وحذف الوسوم مثل style إذا وجدت
-            clean_part = re.sub(r'\s*-\s*style:\w+', '', part.strip(), flags=re.IGNORECASE)
-            if "-" in clean_part:
-                sub_parts = clean_part.split("-", 1)
+            part_str = part.strip()
+            if not part_str:
+                continue
+
+            # استخراج لون الستايل
+            btn_style = None
+            style_match = re.search(r'(?:-\s*style:|\[)(green|blue|red)(?:\])?', part_str, re.IGNORECASE)
+            if style_match:
+                color_name = style_match.group(1).lower()
+                btn_style = style_map.get(color_name)
+                # تنظيف النص من وسم اللون
+                part_str = re.sub(r'\s*-\s*style:(green|blue|red)|\s*\[(green|blue|red)\]', '', part_str, flags=re.IGNORECASE).strip()
+
+            if "-" in part_str:
+                sub_parts = part_str.split("-", 1)
                 title = sub_parts[0].strip()
                 url = sub_parts[1].strip()
+
                 if url.startswith("http://") or url.startswith("https://"):
-                    row.append(InlineKeyboardButton(text=title, url=url))
+                    btn_kwargs = {"text": title, "url": url}
+                    if btn_style:
+                        btn_kwargs["style"] = btn_style
+                    row.append(InlineKeyboardButton(**btn_kwargs))
+
         if row:
             keyboard.append(row)
+            
     return InlineKeyboardMarkup(keyboard) if keyboard else None
 
 # === 4. القوائم واللوحات ===
@@ -282,9 +306,15 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "btn_add_yes":
         WAITING_STATES[user_id] = "wait_for_btn_format"
         guide = (
-            "✏️ **أرسل قائمة أزرار الروابط بهذا التنسيق:**\n\n"
-            "`نص الزر الأول - https://example.com | نص الزر الثاني - https://example2.com`\n"
-            "`نص الزر الثالث - https://example3.com`"
+            "✏️ **أرسل قائمة أزرار الروابط بهذا التنسيق (مع تحديد الألوان اختيارياً):**\n\n"
+            "الزر 1 - http://example1.com - style:green\n"
+            "الزر 2 - http://example2.com - style:blue\n"
+            "الزر 3 - http://example3.com - style:red\n\n"
+            "🎨 **الألوان المتاحة:**\n"
+            "• `style:green` : لون أخضر 🟢\n"
+            "• `style:blue` : لون أزرق 🔵\n"
+            "• `style:red` : لون أحمر 🔴\n\n"
+            "💡 يمكنك أيضاً وضع أكثر من زر في نفس السطر بوضع الرمز `|` بينهما."
         )
         await query.message.edit_text(guide, parse_mode='Markdown', reply_markup=get_back_keyboard())
 
