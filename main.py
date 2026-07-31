@@ -19,6 +19,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 INITIAL_ADMINS = [1611988598, 7065061464]
 DATA_FILE = "bot_data.json"
 WAITING_STATES = {}
+TEMP_BROADCAST = {}
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -34,11 +35,13 @@ def load_data():
                 for admin in INITIAL_ADMINS:
                     if admin not in data.get("admins", []):
                         data.setdefault("admins", []).append(admin)
+                data.setdefault("users", [])
                 return data
         except Exception:
             pass
     return {
         "groups": {},
+        "users": [],
         "admins": INITIAL_ADMINS,
         "emojis": ["😂", "🤣", "💩"],
         "words": [],
@@ -75,7 +78,13 @@ def register_group(chat_id, title):
         data["groups"][chat_id_str] = title
         save_data(data)
 
-# === 2. سيرفر الويب لإبقاء البوت نشطاً ===
+def register_user(user_id):
+    data = load_data()
+    if user_id not in data.get("users", []):
+        data.setdefault("users", []).append(user_id)
+        save_data(data)
+
+# === 2. سيرفر الويب ===
 async def handle_ping(request):
     return web.Response(text="Bot is awake and running!")
 
@@ -88,11 +97,32 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# === 3. القوائم واللوحات ===
+# === 3. تحليل أزرار الروابط ===
+def parse_button_markup(text):
+    keyboard = []
+    lines = text.strip().split("\n")
+    for line in lines:
+        row = []
+        btn_parts = line.split("|")
+        for part in btn_parts:
+            # استخراج النص والربط وحذف الوسوم مثل style إذا وجدت
+            clean_part = re.sub(r'\s*-\s*style:\w+', '', part.strip(), flags=re.IGNORECASE)
+            if "-" in clean_part:
+                sub_parts = clean_part.split("-", 1)
+                title = sub_parts[0].strip()
+                url = sub_parts[1].strip()
+                if url.startswith("http://") or url.startswith("https://"):
+                    row.append(InlineKeyboardButton(text=title, url=url))
+        if row:
+            keyboard.append(row)
+    return InlineKeyboardMarkup(keyboard) if keyboard else None
+
+# === 4. القوائم واللوحات ===
 def get_main_admin_keyboard():
     keyboard = [
-        [InlineKeyboardButton("📢 إذاعة عامة", callback_data="bc_all"),
-         InlineKeyboardButton("🎯 إذاعة مخصصة", callback_data="bc_single_select")],
+        [InlineKeyboardButton("📢 إذاعة عامة للمجموعات", callback_data="bc_all"),
+         InlineKeyboardButton("🎯 إذاعة مخصصة لمجموعة", callback_data="bc_single_select")],
+        [InlineKeyboardButton("👤 إذاعة للمستخدمين (خاص)", callback_data="bc_users")],
         [InlineKeyboardButton("🔇 إدارة الوضع الصامت", callback_data="manage_silent")],
         [InlineKeyboardButton("📖 دليل أوامر الإشراف", callback_data="show_cmd_help")],
         [InlineKeyboardButton("👤 إضافة مشرف جديد", callback_data="add_admin")],
@@ -124,12 +154,21 @@ def get_durations_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
+def get_buttons_decision_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("➕ إضافة أزرار روابط", callback_data="btn_add_yes")],
+        [InlineKeyboardButton("🚀 إرسال بدون أزرار", callback_data="btn_add_no")],
+        [InlineKeyboardButton("❌ إلغاء الإذاعة", callback_data="main_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 def get_back_keyboard(target="main_menu"):
     keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data=target)]]
     return InlineKeyboardMarkup(keyboard)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    register_user(user_id)
     if is_bot_admin(user_id):
         WAITING_STATES[user_id] = None
         await update.message.reply_text(
@@ -139,7 +178,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("مرحباً بك! هذا البوت مخصص لإدارة وحماية المجموعات تلقائياً.")
 
-# === 4. التحكم في الأزرار ===
+# === 5. التحكم في الأزرار ===
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -154,6 +193,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "main_menu":
         WAITING_STATES[user_id] = None
+        TEMP_BROADCAST.pop(user_id, None)
         await query.message.edit_text("أهلاً بك في لوحة التحكم الإدارية! 🛠️", reply_markup=get_main_admin_keyboard())
 
     elif action == "show_cmd_help":
@@ -218,8 +258,12 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text("✏️ **أرسل الرسالة التوضيحية الجديدة للوضع الصامت:**", reply_markup=get_back_keyboard("manage_silent"))
 
     elif action == "bc_all":
-        WAITING_STATES[user_id] = "bc_all"
-        await query.message.edit_text("📝 **أرسل الآن منشور الإذاعة العامة:**", reply_markup=get_back_keyboard())
+        WAITING_STATES[user_id] = "bc_msg_all"
+        await query.message.edit_text("📝 **أرسل الآن منشور الإذاعة العامة للمجموعات:**", reply_markup=get_back_keyboard())
+
+    elif action == "bc_users":
+        WAITING_STATES[user_id] = "bc_msg_users"
+        await query.message.edit_text("📝 **أرسل الآن منشور الإذاعة الخاص للمستخدمين:**", reply_markup=get_back_keyboard())
 
     elif action == "bc_single_select":
         groups = bot_data.get("groups", {})
@@ -232,8 +276,20 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action.startswith("bc_to_"):
         target_g_id = action.replace("bc_to_", "")
-        WAITING_STATES[user_id] = f"bc_single_{target_g_id}"
+        WAITING_STATES[user_id] = f"bc_msg_single_{target_g_id}"
         await query.message.edit_text("📝 **أرسل منشور الإذاعة للمجموعة المحددة:**", reply_markup=get_back_keyboard())
+
+    elif action == "btn_add_yes":
+        WAITING_STATES[user_id] = "wait_for_btn_format"
+        guide = (
+            "✏️ **أرسل قائمة أزرار الروابط بهذا التنسيق:**\n\n"
+            "`نص الزر الأول - https://example.com | نص الزر الثاني - https://example2.com`\n"
+            "`نص الزر الثالث - https://example3.com`"
+        )
+        await query.message.edit_text(guide, parse_mode='Markdown', reply_markup=get_back_keyboard())
+
+    elif action == "btn_add_no":
+        await execute_broadcast(context, user_id, query.message, None)
 
     elif action == "add_admin":
         WAITING_STATES[user_id] = "add_admin"
@@ -273,11 +329,47 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_data(bot_data)
         await query.message.edit_text("✅ تم تفريغ الإيموجيات.", reply_markup=get_back_keyboard("manage_emojis"))
 
-# === 5. معالجة الإدخالات الخاصة بالأدمن ===
+# === 6. تنفيذ عملية الإذاعة ===
+async def execute_broadcast(context: ContextTypes.DEFAULT_TYPE, user_id: int, status_msg, reply_markup):
+    data_bc = TEMP_BROADCAST.get(user_id)
+    if not data_bc:
+        await status_msg.edit_text("❌ حدث خطأ، أعد المحاولة.", reply_markup=get_back_keyboard())
+        return
+
+    bc_type = data_bc["type"]
+    msg_to_copy = data_bc["msg"]
+    bot_data = load_data()
+
+    sent, failed = 0, 0
+    await status_msg.edit_text("⏳ جاري الإذاعة...")
+
+    targets = []
+    if bc_type == "all":
+        targets = list(bot_data.get("groups", {}).keys())
+    elif bc_type == "users":
+        targets = bot_data.get("users", [])
+    elif bc_type.startswith("single_"):
+        targets = [bc_type.replace("single_", "")]
+
+    for target_id in targets:
+        try:
+            await msg_to_copy.copy(chat_id=int(target_id), reply_markup=reply_markup)
+            sent += 1
+            await asyncio.sleep(0.1)
+        except Exception:
+            failed += 1
+
+    TEMP_BROADCAST.pop(user_id, None)
+    WAITING_STATES[user_id] = None
+    await status_msg.edit_text(f"✅ تمت الإذاعة بنجاح!\n- نجاح: {sent}\n- فشل: {failed}", reply_markup=get_back_keyboard())
+
+# === 7. معالجة الرسائل الخاصة بأدمن البوت ===
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
     user_id = update.message.from_user.id
+    register_user(user_id)
+
     if not is_bot_admin(user_id):
         return
 
@@ -288,7 +380,24 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
 
     bot_data = load_data()
 
-    if state == "set_schedule":
+    if state.startswith("bc_msg_"):
+        bc_type = state.replace("bc_msg_", "")
+        TEMP_BROADCAST[user_id] = {
+            "type": bc_type,
+            "msg": update.message
+        }
+        WAITING_STATES[user_id] = "ask_buttons"
+        await update.message.reply_text("🔗 **هل ترغب بإضافة أزرار روابط للمنشور؟**", reply_markup=get_buttons_decision_keyboard())
+
+    elif state == "wait_for_btn_format":
+        btn_markup = parse_button_markup(update.message.text)
+        if not btn_markup:
+            await update.message.reply_text("❌ التنسيق غير صحيح! التأكد من إرسال رابط صحيح (https://...)\nحاول مرة أخرى:")
+            return
+        status_msg = await update.message.reply_text("⏳ جاري تحضير الإذاعة...")
+        await execute_broadcast(context, user_id, status_msg, btn_markup)
+
+    elif state == "set_schedule":
         WAITING_STATES[user_id] = None
         txt = update.message.text.strip()
         if re.match(r"^\d{2}:\d{2}-\d{2}:\d{2}$", txt):
@@ -306,29 +415,6 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         bot_data["silent_mode"]["custom_message"] = update.message.text
         save_data(bot_data)
         await update.message.reply_text("✅ تم حفظ الوصف الجديد للوضع الصامت!", reply_markup=get_back_keyboard("manage_silent"))
-
-    elif state == "bc_all":
-        WAITING_STATES[user_id] = None
-        groups = bot_data.get("groups", {})
-        status_msg = await update.message.reply_text("⏳ جاري الإذاعة...")
-        sent, failed = 0, 0
-        for g_id in groups.keys():
-            try:
-                await update.message.copy(chat_id=int(g_id))
-                sent += 1
-                await asyncio.sleep(0.1)
-            except Exception:
-                failed += 1
-        await status_msg.edit_text(f"✅ تمت الإذاعة!\n- نجاح: {sent}\n- فشل: {failed}", reply_markup=get_back_keyboard())
-
-    elif state.startswith("bc_single_"):
-        WAITING_STATES[user_id] = None
-        target_g_id = state.replace("bc_single_", "")
-        try:
-            await update.message.copy(chat_id=int(target_g_id))
-            await update.message.reply_text("✅ تم إرسال الرسالة بنجاح!", reply_markup=get_back_keyboard())
-        except Exception as e:
-            await update.message.reply_text(f"❌ فشل الإرسال: {e}", reply_markup=get_back_keyboard())
 
     elif state == "add_admin":
         WAITING_STATES[user_id] = None
@@ -359,7 +445,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             save_data(bot_data)
             await update.message.reply_text(f"✅ تم إضافة الإيموجي {emoji}!", reply_markup=get_back_keyboard("manage_emojis"))
 
-# === 6. أوامر الإشراف السريعة للمجموعات ===
+# === 8. أوامر الإشراف السريعة للمجموعات ===
 def parse_time(time_str):
     unit = time_str[-1].lower()
     value = int(time_str[:-1])
@@ -455,7 +541,7 @@ async def admin_actions_handler(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             await update.message.reply_text(f"❌ فشل إلغاء الكتم: {e}")
 
-# === 7. فلتر المجموعات (مع استثناء حماية منشورات القناة المربوطة) ===
+# === 9. فلتر المجموعات ===
 def is_silent_active(bot_data):
     s = bot_data.get("silent_mode", {})
     if not s.get("enabled"):
@@ -494,7 +580,7 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = update.message
 
-    # ⭐ استثناء القناة المربوطة والمنشورات المرسلة باسم القناة ⭐
+    # استثناء منشورات القناة المربوطة
     if msg.is_automatic_forward or (msg.sender_chat and msg.sender_chat.type == "channel"):
         return
 
@@ -557,7 +643,7 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-# === 8. تشغيل البوت ===
+# === 10. تشغيل البوت ===
 async def main():
     if not BOT_TOKEN:
         print("خطأ: لم يتم ضبط BOT_TOKEN!")
