@@ -59,6 +59,11 @@ NON_ADMIN_SPAM_TEXT = (
     "شكراً لتفهمك 🙏"
 )
 
+FORCED_SUB_MSG = (
+    "⚠️ **تنبيه: الاشتراك الإجباري**\n\n"
+    "يجب عليك الاشتراك في القناة المحددة لتتمكن من المشاركة في هذه المجموعة.\n\n"
+    "🔔 **الرجاء الاشتراك أولاً ثم الضغط على زر التحقق.**"
+)
 
 # === 1. إدارة قاعدة البيانات ===
 def default_data():
@@ -87,6 +92,9 @@ def default_data():
             "threshold": 3,
             "duration_minutes": 30,
             "message": "⚠️ نداء الاستغاثة يدل على وجود مخالفة أو نزاع داخل المجموعة، الرجاء الانتظار حتى وصول المشرفين."
+        },
+        "forced_subscription": {
+            "groups": {}
         }
     }
 
@@ -131,6 +139,10 @@ def load_data():
                     "message",
                     "⚠️ نداء الاستغاثة يدل على وجود مخالفة أو نزاع داخل المجموعة، الرجاء الانتظار حتى وصول المشرفين."
                 )
+                
+                data.setdefault("forced_subscription", {})
+                data["forced_subscription"].setdefault("groups", {})
+                
                 return data
         except Exception:
             pass
@@ -239,6 +251,7 @@ def get_main_admin_keyboard():
         [InlineKeyboardButton("🔇 إدارة الوضع الصامت", callback_data="manage_silent")],
         [InlineKeyboardButton("🆘 نداء الاستغاثة", callback_data="manage_rescue")],
         [InlineKeyboardButton("📖 دليل أوامر الإشراف", callback_data="show_cmd_help")],
+        [InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="manage_forced_sub")],
         [InlineKeyboardButton("👤 إضافة مشرف جديد", callback_data="add_admin")],
         [InlineKeyboardButton("⛔ الكلمات المحظورة", callback_data="manage_words"),
          InlineKeyboardButton("😀 الإيموجيات المحظورة", callback_data="manage_emojis")],
@@ -340,6 +353,35 @@ def get_stickers_keyboard(data):
     return InlineKeyboardMarkup(keyboard)
 
 
+def get_forced_sub_keyboard(channel_id=None, group_id=None):
+    """إنشاء لوحة مفاتيح للاشتراك الإجباري"""
+    keyboard = []
+    
+    if channel_id:
+        try:
+            channel_link = f"https://t.me/{channel_id}" if isinstance(channel_id, int) else f"https://t.me/{channel_id}"
+            keyboard.append([InlineKeyboardButton("📢 الانضمام إلى القناة", url=channel_link)])
+        except:
+            pass
+    
+    keyboard.append([InlineKeyboardButton("✅ تحقق مرة أخرى", callback_data=f"check_sub_{group_id}")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_forced_sub_admin_keyboard():
+    """لوحة إدارة الاشتراك الإجباري للمشرفين"""
+    keyboard = [
+        [InlineKeyboardButton("🔘 تفعيل/تعطيل الاشتراك", callback_data="fs_toggle")],
+        [InlineKeyboardButton("🎯 اختيار المجموعة المستهدفة", callback_data="fs_select_group")],
+        [InlineKeyboardButton("📢 اختيار القناة (إعادة توجيه)", callback_data="fs_select_channel")],
+        [InlineKeyboardButton("✏️ تعديل رسالة الاشتراك", callback_data="fs_edit_message")],
+        [InlineKeyboardButton("📊 عرض الإعدادات الحالية", callback_data="fs_view_settings")],
+        [InlineKeyboardButton("🗑️ حذف إعدادات المجموعة", callback_data="fs_delete_settings")],
+        [InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="main_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 async def send_non_admin_response(update: Update):
     """رسالة تعريفية لغير المشرفين في أول رسالة، ثم رسالة توضح أن الرسائل لا تصل للمطور بعد ذلك."""
     user_id = update.effective_user.id
@@ -363,6 +405,51 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await send_non_admin_response(update)
+
+
+async def check_user_subscription(context: ContextTypes.DEFAULT_TYPE, user_id: int, channel_id: int) -> bool:
+    """التحقق من اشتراك المستخدم في القناة"""
+    try:
+        member = await context.bot.get_chat_member(channel_id, user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except Exception as e:
+        logging.error(f"خطأ في التحقق من الاشتراك: {e}")
+        return False
+
+
+def update_group_forced_sub_settings(group_id: str, channel_id: int = None, enabled: bool = None, custom_message: str = None):
+    """تحديث إعدادات الاشتراك الإجباري لمجموعة معينة"""
+    bot_data = load_data()
+    
+    if "forced_subscription" not in bot_data:
+        bot_data["forced_subscription"] = {"groups": {}}
+    
+    if "groups" not in bot_data["forced_subscription"]:
+        bot_data["forced_subscription"]["groups"] = {}
+    
+    group_id_str = str(group_id)
+    
+    if group_id_str not in bot_data["forced_subscription"]["groups"]:
+        bot_data["forced_subscription"]["groups"][group_id_str] = {
+            "channel_id": None,
+            "enabled": False,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "custom_message": FORCED_SUB_MSG
+        }
+    
+    settings = bot_data["forced_subscription"]["groups"][group_id_str]
+    
+    if channel_id is not None:
+        settings["channel_id"] = channel_id
+    if enabled is not None:
+        settings["enabled"] = enabled
+    if custom_message is not None:
+        settings["custom_message"] = custom_message
+    
+    settings["updated_at"] = datetime.now().isoformat()
+    
+    save_data(bot_data)
 
 
 # === 5. التحكم في الأزرار ===
@@ -589,615 +676,3 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text("🎯 **اختر المجموعة المستهدفة:**", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action.startswith("bc_to_"):
-        target_g_id = action.replace("bc_to_", "")
-        WAITING_STATES[user_id] = f"bc_msg_single_{target_g_id}"
-        await query.message.edit_text("📝 **أرسل منشور الإذاعة للمجموعة المحددة:**", reply_markup=get_back_keyboard())
-
-    elif action == "btn_add_yes":
-        WAITING_STATES[user_id] = "wait_for_btn_format"
-        guide = (
-            "✏️ **أرسل قائمة أزرار الروابط بهذا التنسيق (مع تحديد الألوان اختيارياً):**\n\n"
-            "الزر 1 - http://example1.com - style:green\n"
-            "الزر 2 - http://example2.com - style:blue\n"
-            "الزر 3 - http://example3.com - style:red\n\n"
-            "🎨 **الألوان المتاحة:**\n"
-            "• `style:green` : لون أخضر 🟢\n"
-            "• `style:blue` : لون أزرق 🔵\n"
-            "• `style:red` : لون أحمر 🔴\n\n"
-            "💡 يمكنك أيضاً وضع أكثر من زر في نفس السطر بوضع الرمز `|` بينهما."
-        )
-        await query.message.edit_text(guide, parse_mode='Markdown', reply_markup=get_back_keyboard())
-
-    elif action == "btn_add_no":
-        await execute_broadcast(context, user_id, query.message, None)
-
-    elif action == "add_admin":
-        WAITING_STATES[user_id] = "add_admin"
-        await query.message.edit_text("👤 **أرسل ID المشرف الجديد:**", reply_markup=get_back_keyboard())
-
-    # ---------- الكلمات ----------
-    elif action == "manage_words":
-        words = ", ".join(bot_data.get("words", [])) or "لا توجد"
-        keyboard = [
-            [InlineKeyboardButton("➕ إضافة كلمة", callback_data="add_word"), InlineKeyboardButton("🗑️ مسح الكل", callback_data="clear_words")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")]
-        ]
-        await query.message.edit_text(f"⛔ **الكلمات المحظورة:**\n`{words}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif action == "add_word":
-        WAITING_STATES[user_id] = "add_word"
-        await query.message.edit_text("✏️ **أرسل الكلمة المحظورة:**", reply_markup=get_back_keyboard("manage_words"))
-
-    elif action == "clear_words":
-        bot_data["words"] = []
-        save_data(bot_data)
-        await query.message.edit_text("✅ تم تفريغ الكلمات.", reply_markup=get_back_keyboard("manage_words"))
-
-    # ---------- الإيموجيات ----------
-    elif action == "manage_emojis":
-        emojis = " ".join(bot_data.get("emojis", [])) or "لا توجد"
-        keyboard = [
-            [InlineKeyboardButton("➕ إضافة إيموجي", callback_data="add_emoji"), InlineKeyboardButton("🗑️ مسح الكل", callback_data="clear_emojis")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")]
-        ]
-        await query.message.edit_text(f"😀 **الإيموجيات المحظورة:**\n{emojis}", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif action == "add_emoji":
-        WAITING_STATES[user_id] = "add_emoji"
-        await query.message.edit_text("✏️ **أرسل الإيموجي المحظور:**", reply_markup=get_back_keyboard("manage_emojis"))
-
-    elif action == "clear_emojis":
-        bot_data["emojis"] = []
-        save_data(bot_data)
-        await query.message.edit_text("✅ تم تفريغ الإيموجيات.", reply_markup=get_back_keyboard("manage_emojis"))
-
-    # ---------- الروابط ----------
-    elif action == "manage_links":
-        links = ", ".join(bot_data.get("banned_links", [])) or "لا توجد"
-        await query.message.edit_text(
-            f"🔗 **إعدادات الروابط المحظورة:**\n\nالقائمة الحالية:\n`{links}`",
-            parse_mode='Markdown',
-            reply_markup=get_links_keyboard(bot_data)
-        )
-
-    elif action == "toggle_block_all_links":
-        bot_data["block_all_links"] = not bot_data.get("block_all_links", False)
-        save_data(bot_data)
-        await query.message.edit_text("✅ تم تحديث إعداد حظر جميع الروابط.", reply_markup=get_links_keyboard(bot_data))
-
-    elif action == "add_link":
-        WAITING_STATES[user_id] = "add_link"
-        await query.message.edit_text("✏️ **أرسل الرابط أو النطاق المراد حظره (مثال: example.com):**", reply_markup=get_back_keyboard("manage_links"))
-
-    elif action == "clear_links":
-        bot_data["banned_links"] = []
-        save_data(bot_data)
-        await query.message.edit_text("✅ تم تفريغ قائمة الروابط المحظورة.", reply_markup=get_back_keyboard("manage_links"))
-
-    # ---------- الملصقات ----------
-    elif action == "manage_stickers":
-        await query.message.edit_text(
-            "🎭 **إعدادات حظر الملصقات والصور المتحركة:**",
-            parse_mode='Markdown',
-            reply_markup=get_stickers_keyboard(bot_data)
-        )
-
-    elif action == "toggle_block_stickers":
-        bot_data["block_stickers"] = not bot_data.get("block_stickers", False)
-        save_data(bot_data)
-        await query.message.edit_text("✅ تم تحديث إعداد حظر الملصقات.", reply_markup=get_stickers_keyboard(bot_data))
-
-    elif action == "toggle_block_animated":
-        bot_data["block_animated_stickers"] = not bot_data.get("block_animated_stickers", False)
-        save_data(bot_data)
-        await query.message.edit_text("✅ تم تحديث إعداد حظر الملصقات المتحركة و GIF.", reply_markup=get_stickers_keyboard(bot_data))
-
-
-# === 6. تنفيذ عملية الإذاعة ===
-async def execute_broadcast(context: ContextTypes.DEFAULT_TYPE, user_id: int, status_msg, reply_markup):
-    data_bc = TEMP_BROADCAST.get(user_id)
-    if not data_bc:
-        await status_msg.edit_text("❌ حدث خطأ، أعد المحاولة.", reply_markup=get_back_keyboard())
-        return
-
-    bc_type = data_bc["type"]
-    msg_to_copy = data_bc["msg"]
-    bot_data = load_data()
-
-    sent, failed = 0, 0
-    await status_msg.edit_text("⏳ جاري الإذاعة...")
-
-    targets = []
-    if bc_type == "all":
-        targets = list(bot_data.get("groups", {}).keys())
-    elif bc_type == "users":
-        targets = bot_data.get("users", [])
-    elif bc_type.startswith("single_"):
-        targets = [bc_type.replace("single_", "")]
-
-    for target_id in targets:
-        try:
-            await msg_to_copy.copy(chat_id=int(target_id), reply_markup=reply_markup)
-            sent += 1
-            await asyncio.sleep(0.1)
-        except Exception:
-            failed += 1
-
-    TEMP_BROADCAST.pop(user_id, None)
-    WAITING_STATES[user_id] = None
-    await status_msg.edit_text(f"✅ تمت الإذاعة بنجاح!\n- نجاح: {sent}\n- فشل: {failed}", reply_markup=get_back_keyboard())
-
-
-# === 7. معالجة الرسائل الخاصة بأدمن البوت ===
-async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-    user_id = update.message.from_user.id
-    register_user(user_id)
-
-    if not is_bot_admin(user_id):
-        await send_non_admin_response(update)
-        return
-
-    state = WAITING_STATES.get(user_id)
-    if not state:
-        await update.message.reply_text("يرجى استخدام الأوامر عبر القائمة من /start", reply_markup=get_main_admin_keyboard())
-        return
-
-    bot_data = load_data()
-
-    if state.startswith("bc_msg_"):
-        bc_type = state.replace("bc_msg_", "")
-        TEMP_BROADCAST[user_id] = {
-            "type": bc_type,
-            "msg": update.message
-        }
-        WAITING_STATES[user_id] = "ask_buttons"
-        await update.message.reply_text("🔗 **هل ترغب بإضافة أزرار روابط للمنشور؟**", reply_markup=get_buttons_decision_keyboard())
-
-    elif state == "wait_for_btn_format":
-        btn_markup = parse_button_markup(update.message.text)
-        if not btn_markup:
-            await update.message.reply_text("❌ التنسيق غير صحيح! التأكد من إرسال رابط صحيح (https://...)\nحاول مرة أخرى:")
-            return
-        status_msg = await update.message.reply_text("⏳ جاري تحضير الإذاعة...")
-        await execute_broadcast(context, user_id, status_msg, btn_markup)
-
-    elif state == "set_schedule":
-        WAITING_STATES[user_id] = None
-        txt = update.message.text.strip()
-        if re.match(r"^\d{2}:\d{2}-\d{2}:\d{2}$", txt):
-            start, end = txt.split("-")
-            bot_data["silent_mode"]["start_time"] = start
-            bot_data["silent_mode"]["end_time"] = end
-            bot_data["silent_mode"]["enabled"] = True
-            save_data(bot_data)
-            await update.message.reply_text(f"✅ تم ضبط جدول الوضع الصامت من `{start}` إلى `{end}`!", parse_mode='Markdown', reply_markup=get_back_keyboard("manage_silent"))
-        else:
-            await update.message.reply_text("❌ صيغة غير صحيحة، اكتبها مثل: `22:00-07:00`", parse_mode='Markdown', reply_markup=get_back_keyboard("manage_silent"))
-
-    elif state == "set_silent_msg":
-        WAITING_STATES[user_id] = None
-        bot_data["silent_mode"]["custom_message"] = update.message.text
-        save_data(bot_data)
-        await update.message.reply_text("✅ تم حفظ الوصف الجديد للوضع الصامت!", reply_markup=get_back_keyboard("manage_silent"))
-
-    elif state == "add_admin":
-        WAITING_STATES[user_id] = None
-        try:
-            new_id = int(update.message.text.strip())
-            if new_id not in bot_data["admins"]:
-                bot_data["admins"].append(new_id)
-                save_data(bot_data)
-                await update.message.reply_text(f"✅ تم إضافة المشرف `{new_id}`!", parse_mode='Markdown', reply_markup=get_back_keyboard())
-            else:
-                await update.message.reply_text("⚠️ هذا المستخدم مشرف بالفعل.", reply_markup=get_back_keyboard())
-        except ValueError:
-            await update.message.reply_text("❌ يرجى إرسال أرقام الـ ID فقط.", reply_markup=get_back_keyboard())
-
-    elif state == "add_word":
-        WAITING_STATES[user_id] = None
-        word = update.message.text.strip().lower()
-        if word not in bot_data["words"]:
-            bot_data["words"].append(word)
-            save_data(bot_data)
-            await update.message.reply_text(f"✅ تم إضافة الكلمة `{word}`!", parse_mode='Markdown', reply_markup=get_back_keyboard("manage_words"))
-
-    elif state == "add_emoji":
-        WAITING_STATES[user_id] = None
-        emoji = update.message.text.strip()
-        if emoji not in bot_data["emojis"]:
-            bot_data["emojis"].append(emoji)
-            save_data(bot_data)
-            await update.message.reply_text(f"✅ تم إضافة الإيموجي {emoji}!", reply_markup=get_back_keyboard("manage_emojis"))
-
-    elif state == "add_link":
-        WAITING_STATES[user_id] = None
-        link = update.message.text.strip().lower()
-        if link not in bot_data["banned_links"]:
-            bot_data["banned_links"].append(link)
-            save_data(bot_data)
-            await update.message.reply_text(f"✅ تم إضافة الرابط `{link}` للقائمة المحظورة!", parse_mode='Markdown', reply_markup=get_back_keyboard("manage_links"))
-
-    elif state == "rescue_set_keyword":
-        WAITING_STATES[user_id] = None
-        keyword = update.message.text.strip()
-        bot_data["rescue_mode"]["keyword"] = keyword
-        save_data(bot_data)
-        await update.message.reply_text(f"✅ تم تحديث كلمة النداء إلى: `{keyword}`", parse_mode='Markdown', reply_markup=get_back_keyboard("manage_rescue"))
-
-    elif state == "rescue_set_threshold":
-        WAITING_STATES[user_id] = None
-        try:
-            threshold = int(update.message.text.strip())
-            if threshold < 1:
-                raise ValueError
-            bot_data["rescue_mode"]["threshold"] = threshold
-            save_data(bot_data)
-            await update.message.reply_text(f"✅ تم تحديث عدد النداءات إلى: {threshold}", reply_markup=get_back_keyboard("manage_rescue"))
-        except ValueError:
-            await update.message.reply_text("❌ يرجى إرسال رقم صحيح أكبر من صفر.", reply_markup=get_back_keyboard("manage_rescue"))
-
-    elif state == "rescue_set_duration":
-        WAITING_STATES[user_id] = None
-        try:
-            duration = int(update.message.text.strip())
-            if duration < 1:
-                raise ValueError
-            bot_data["rescue_mode"]["duration_minutes"] = duration
-            save_data(bot_data)
-            await update.message.reply_text(f"✅ تم تحديث مدة الصمت التلقائي إلى: {duration} دقيقة", reply_markup=get_back_keyboard("manage_rescue"))
-        except ValueError:
-            await update.message.reply_text("❌ يرجى إرسال رقم صحيح أكبر من صفر.", reply_markup=get_back_keyboard("manage_rescue"))
-
-    elif state == "rescue_set_message":
-        WAITING_STATES[user_id] = None
-        bot_data["rescue_mode"]["message"] = update.message.text
-        save_data(bot_data)
-        await update.message.reply_text("✅ تم تحديث رسالة النداء!", reply_markup=get_back_keyboard("manage_rescue"))
-
-
-# === 8. أوامر الإشراف السريعة للمجموعات ===
-def parse_time(time_str):
-    unit = time_str[-1].lower()
-    value = int(time_str[:-1])
-    if unit == 'm':
-        return timedelta(minutes=value)
-    elif unit == 'h':
-        return timedelta(hours=value)
-    elif unit == 'd':
-        return timedelta(days=value)
-    return None
-
-
-async def admin_actions_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or update.effective_chat.type == 'private':
-        return
-
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not await is_group_admin(context, chat_id, user_id):
-        return
-
-    text = update.message.text.strip()
-    cmd = text.split()[0].lower()
-
-    target_user_id = None
-    target_user_name = "المستخدم"
-
-    if update.message.reply_to_message:
-        target_user_id = update.message.reply_to_message.from_user.id
-        target_user_name = update.message.reply_to_message.from_user.first_name
-
-    if cmd in ["/حظر", "/ban"]:
-        if not target_user_id:
-            await update.message.reply_text("❌ يرجى الرد على رسالة المستخدم للقيام بالحظر.")
-            return
-
-        duration = None
-        if len(context.args) > 0 and not context.args[0].startswith("@"):
-            try:
-                duration = parse_time(context.args[0])
-            except Exception:
-                pass
-
-        try:
-            until_date = datetime.now() + duration if duration else None
-            await context.bot.ban_chat_member(chat_id, target_user_id, until_date=until_date)
-            dur_text = f" لمدة {context.args[0]}" if duration else " نهائياً"
-            await update.message.reply_text(f"🚫 تم حظر {target_user_name}{dur_text}.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ فشل الحظر: {e}")
-
-    elif cmd in ["/كتم", "/mute"]:
-        if not target_user_id:
-            await update.message.reply_text("❌ يرجى الرد على رسالة المستخدم للقيام بالكتم.")
-            return
-
-        duration = None
-        if len(context.args) > 0 and not context.args[0].startswith("@"):
-            try:
-                duration = parse_time(context.args[0])
-            except Exception:
-                pass
-
-        try:
-            until_date = datetime.now() + duration if duration else None
-            permissions = ChatPermissions(can_send_messages=False)
-            await context.bot.restrict_chat_member(chat_id, target_user_id, permissions=permissions, until_date=until_date)
-            dur_text = f" لمدة {context.args[0]}" if duration else " نهائياً"
-            await update.message.reply_text(f"🔇 تم كتم {target_user_name}{dur_text}.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ فشل الكتم: {e}")
-
-    elif cmd in ["/الغاء_الحظر", "/unban"]:
-        if not target_user_id:
-            await update.message.reply_text("❌ يرجى الرد على رسالة المستخدم لإلغاء الحظر.")
-            return
-
-        try:
-            await context.bot.unban_chat_member(chat_id, target_user_id)
-            await update.message.reply_text(f"✅ تم إلغاء حظر {target_user_name}.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ فشل إلغاء الحظر: {e}")
-
-    elif cmd in ["/الغاء_الكتم", "/unmute"]:
-        if not target_user_id:
-            await update.message.reply_text("❌ يرجى الرد على رسالة المستخدم لإلغاء الكتم.")
-            return
-
-        try:
-            permissions = ChatPermissions(can_send_messages=True, can_send_other_messages=True)
-            await context.bot.restrict_chat_member(chat_id, target_user_id, permissions=permissions)
-            await update.message.reply_text(f"🔊 تم إلغاء كتم {target_user_name}.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ فشل إلغاء الكتم: {e}")
-
-
-# === 9. فلتر المجموعات ===
-def is_silent_active(bot_data, chat_id):
-    """يتحقق مما إذا كان الوضع الصامت مفعلاً، ويطبَّق فقط على المجموعة المستهدفة المحددة."""
-    s = bot_data.get("silent_mode", {})
-    if not s.get("enabled"):
-        return False
-
-    target = s.get("target_group")
-    if not target or str(target) != str(chat_id):
-        return False
-
-    now = datetime.now()
-
-    until_ts = s.get("until_timestamp", 0)
-    if until_ts > 0:
-        if now.timestamp() < until_ts:
-            return True
-        else:
-            bot_data["silent_mode"]["until_timestamp"] = 0
-            save_data(bot_data)
-
-    start_str = s.get("start_time", "22:00")
-    end_str = s.get("end_time", "07:00")
-
-    try:
-        sh, sm = map(int, start_str.split(":"))
-        eh, em = map(int, end_str.split(":"))
-
-        start_time = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
-        end_time = now.replace(hour=eh, minute=em, second=0, microsecond=0)
-
-        if start_time < end_time:
-            return start_time <= now <= end_time
-        else:
-            return now >= start_time or now <= end_time
-    except Exception:
-        return False
-
-
-async def delete_and_warn(msg, context, chat_id, first_name, reason):
-    try:
-        await msg.delete()
-        warning_msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"عذراً يا {first_name}، يمنع استخدام ({reason}) في المجموعة!"
-        )
-        await asyncio.sleep(5)
-        await warning_msg.delete()
-    except Exception:
-        pass
-
-
-async def trigger_rescue_silent(context, chat_id, bot_data, rescue):
-    """تفعيل الوضع الصامت تلقائياً بعد اكتمال نداء الاستغاثة."""
-    duration = rescue.get("duration_minutes", 30)
-    until_ts = int((datetime.now() + timedelta(minutes=duration)).timestamp())
-
-    bot_data["silent_mode"]["until_timestamp"] = until_ts
-    bot_data["silent_mode"]["enabled"] = True
-    bot_data["silent_mode"]["target_group"] = str(chat_id)
-    save_data(bot_data)
-
-    RESCUE_TRACK[chat_id] = {"count": 0, "callers": []}
-
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء الوضع الصامت", callback_data="cancel_silent")]])
-    threshold = rescue.get("threshold", 3)
-    text = (
-        f"🚨 **تم تفعيل الوضع الصامت تلقائياً** بسبب تكرار نداء الاستغاثة ({threshold}/{threshold})!\n\n"
-        f"{rescue.get('message', '')}\n\n"
-        "يمكن لمشرفي المجموعة إلغاء الوضع الصامت بالضغط على الزر أدناه."
-    )
-    try:
-        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown', reply_markup=kb)
-    except Exception:
-        pass
-
-
-async def handle_rescue_keyword(update, context, chat_id, bot_data, text):
-    rescue = bot_data.get("rescue_mode", {})
-    target = rescue.get("target_group")
-    if not rescue.get("enabled") or not target or str(target) != str(chat_id):
-        return False
-
-    keyword = (rescue.get("keyword") or "").strip()
-    if not keyword or keyword not in text:
-        return False
-
-    threshold = rescue.get("threshold", 3)
-    track = RESCUE_TRACK.setdefault(chat_id, {"count": 0, "callers": []})
-    track["count"] += 1
-    caller_name = update.effective_user.first_name if update.effective_user else "عضو"
-    track["callers"].append(caller_name)
-    count = track["count"]
-
-    if count >= threshold:
-        await trigger_rescue_silent(context, chat_id, bot_data, rescue)
-    elif count == 1:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"🆘 تم رصد نداء استغاثة ({count}/{threshold})\nفي حال تكرر النداء سيتم تفعيل الوضع الصامت تلقائياً."
-        )
-    else:
-        callers_text = "، ".join(track["callers"])
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                f"⚠️ تحذير: نداء استغاثة ({count}/{threshold})\n"
-                f"في حال كان النداء بدون سبب حقيقي، سيتم حظر من قام بالنداء عند تفعيل الوضع الصامت: {callers_text}"
-            )
-        )
-
-    return True
-
-
-async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.effective_chat:
-        return
-
-    msg = update.message
-    chat_id = update.effective_chat.id
-
-    # استثناء منشورات القناة المربوطة والرسائل المرسلة باسم الأدمن المتخفي (GroupAnonymousBot / اسم المجموعة)
-    if msg.is_automatic_forward or (msg.sender_chat and msg.sender_chat.id == chat_id):
-        return
-
-    user_id = update.effective_user.id if update.effective_user else None
-    register_group(chat_id, update.effective_chat.title or "مجموعة")
-
-    bot_data = load_data()
-
-    user_is_admin = False
-    if user_id:
-        user_is_admin = await is_group_admin(context, chat_id, user_id)
-
-    # فحص الوضع الصامت (يُطبَّق فقط على المجموعة المستهدفة المحددة)
-    if is_silent_active(bot_data, chat_id):
-        if user_id and not user_is_admin:
-            try:
-                await msg.delete()
-                custom_msg = bot_data["silent_mode"].get("custom_message", "🔇 الوضع الصامت مفعل حالياً!")
-                first_name = update.effective_user.first_name if update.effective_user else "العضو"
-                warn = await context.bot.send_message(chat_id=chat_id, text=f"عذراً يا {first_name}:\n{custom_msg}")
-                await asyncio.sleep(5)
-                await warn.delete()
-            except Exception:
-                pass
-            return
-
-    # المشرفون معفيون من فلاتر المحتوى (كلمات/إيموجي/روابط/ملصقات/نداء الاستغاثة)
-    if user_is_admin:
-        return
-
-    first_name = update.effective_user.first_name if update.effective_user else "المستخدم"
-
-    # فحص الملصقات (ستيكرز) والصور المتحركة GIF
-    if msg.sticker:
-        is_animated_or_video = bool(msg.sticker.is_animated or msg.sticker.is_video)
-        if bot_data.get("block_animated_stickers") and is_animated_or_video:
-            await delete_and_warn(msg, context, chat_id, first_name, "ملصق متحرك")
-            return
-        if bot_data.get("block_stickers"):
-            await delete_and_warn(msg, context, chat_id, first_name, "ملصقات (ستيكرز)")
-            return
-
-    if msg.animation and bot_data.get("block_animated_stickers"):
-        await delete_and_warn(msg, context, chat_id, first_name, "صورة متحركة GIF")
-        return
-
-    # فحص الكلمات والإيموجي والروابط الممنوعة + نداء الاستغاثة
-    text = msg.text or msg.caption
-    if not text:
-        return
-
-    # نداء الاستغاثة (يُفحص بشكل مستقل عن باقي المخالفات)
-    handled = await handle_rescue_keyword(update, context, chat_id, bot_data, text)
-    if handled:
-        return
-
-    text_lower = text.lower()
-
-    forbidden_emojis = bot_data.get("emojis", [])
-    forbidden_words = bot_data.get("words", [])
-    forbidden_links = bot_data.get("banned_links", [])
-    block_all_links = bot_data.get("block_all_links", False)
-
-    is_violating = False
-    reason = ""
-
-    for emoji in forbidden_emojis:
-        if emoji in text:
-            is_violating = True
-            reason = "إيموجي ممنوع"
-            break
-
-    if not is_violating:
-        for word in forbidden_words:
-            if word in text_lower:
-                is_violating = True
-                reason = "كلمة محظورة"
-                break
-
-    url_regex = re.compile(r'(https?://\S+|t\.me/\S+|www\.\S+)', re.IGNORECASE)
-    has_link = bool(url_regex.search(text))
-
-    if not is_violating and block_all_links and has_link:
-        is_violating = True
-        reason = "رابط ممنوع"
-
-    if not is_violating:
-        for link in forbidden_links:
-            if link and link in text_lower:
-                is_violating = True
-                reason = "رابط محظور"
-                break
-
-    if is_violating:
-        await delete_and_warn(msg, context, chat_id, first_name, reason)
-
-
-# === 10. تشغيل البوت ===
-async def main():
-    if not BOT_TOKEN:
-        print("خطأ: لم يتم ضبط BOT_TOKEN!")
-        return
-
-    await start_web_server()
-
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CallbackQueryHandler(button_click))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND), handle_private_message))
-
-    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.Regex(r"^/(حظر|كتم|الغاء_الحظر|الغاء_الكتم|ban|mute|unban|unmute)"), admin_actions_handler))
-
-    app.add_handler(MessageHandler(filters.ChatType.GROUPS, group_filter))
-
-    print("البوت يعمل بنجاح...")
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-    await asyncio.Event().wait()
-
-
-if __name__ == '__main__':
-    asyncio.run(main())
