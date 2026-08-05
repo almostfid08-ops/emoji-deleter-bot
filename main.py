@@ -33,23 +33,39 @@ logging.basicConfig(
 DEVELOPER_USERNAME = "@Nabil1r"
 
 NON_ADMIN_INFO_TEXT = (
-    "🤖 **مرحباً بك!**\n\n"
-    "هذا البوت مُصمَّم ليعمل كـ**مشرف داخل مجموعات الدراسة**، ومهامه:\n\n"
-    "• 🚫 حذف الإيموجيات غير المرغوب بها.\n"
-    "• 🚫 حذف الكلمات والروابط الممنوعة.\n"
-    "• 🚫 حذف الملصقات (الستيكرز) والصور المتحركة GIF الممنوعة.\n"
-    "• 🔇 تفعيل وضع صامت في أوقات محددة، أو تلقائياً عند نداء استغاثة من الأعضاء.\n"
-    "• 📢 نظام الاشتراك الإجباري في قناة/مجموعة معينة.\n"
-    "• 🛡️ الحفاظ على الجو الدراسي الهادئ داخل المجموعة بشكل عام.\n\n"
+    "🤖 **مرحباً بك!**
+
+"
+    "هذا البوت مُصمّم ليعمل كـ**مشرف داخل مجموعات الدراسة**، ومهامه:
+
+"
+    "• 🚫 حذف الإيموجيات غير المرغوب بها.
+"
+    "• 🚫 حذف الكلمات والروابط الممنوعة.
+"
+    "• 🚫 حذف الملصقات (الستيكرز) والصور المتحركة GIF الممنوعة.
+"
+    "• 🔇 تفعيل وضع صامت في أوقات محددة، أو تلقائياً عند نداء استغاثة من الأعضاء.
+"
+    "• 📢 نظام الاشتراك الإجباري في قناة/مجموعة معينة.
+"
+    "• 🛡️ الحفاظ على الجو الدراسي الهادئ داخل المجموعة بشكل عام.
+
+"
     f"للحصول على هذه الميزات داخل مجموعتك، يرجى التواصل مع مطور البوت {DEVELOPER_USERNAME} "
     "كي يقوم بإضافتك كمشرف للبوت والسماح لك باستخدام ميزاته."
 )
 
 NON_ADMIN_SPAM_TEXT = (
-    "⚠️ **تنبيه:**\n"
+    "⚠️ **تنبيه:**
+"
     "هذا البوت غير مبرمج لاستقبال الرسائل، ورسائلك هذه **لا تصل إلى المطور نهائياً**، "
-    "لذلك لن تحصل هنا على أي رد رسمي.\n\n"
-    f"في حال احتجت لأي خدمة أو أردت تفعيل البوت داخل مجموعتك، يرجى التواصل مباشرة مع المطور: {DEVELOPER_USERNAME}\n\n"
+    "لذلك لن تحصل هنا على أي رد رسمي.
+
+"
+    f"في حال احتجت لأي خدمة أو أردت تفعيل البوت داخل مجموعتك، يرجى التواصل مباشرة مع المطور: {DEVELOPER_USERNAME}
+
+"
     "شكراً لتفهمك 🙏"
 )
 
@@ -87,13 +103,19 @@ def default_data():
             "channel_id": None,
             "channel_username": None,
             "join_message": (
-                "⚠️ **عذراً يا {first_name}**\n\n"
-                "يجب عليك الاشتراك في القناة أدناه لتتمكن من الكتابة في هذه المجموعة:\n"
-                "{channel_link}\n\n"
+                "⚠️ **عذراً يا {first_name}**
+
+"
+                "يجب عليك الاشتراك في القناة أدناه لتتمكن من الكتابة في هذه المجموعة:
+"
+                "{channel_link}
+
+"
                 "🔘 اضغط على الزر ثم عد وأرسل رسالتك."
             ),
             "thank_you_message": (
-                "✅ شكراً لك يا {first_name} على اشتراكك!\n"
+                "✅ شكراً لك يا {first_name} على اشتراكك!
+"
                 "يمكنك الآن التفاعل بحرية في المجموعة."
             )
         }
@@ -143,14 +165,20 @@ def load_data():
                 data["subscription_mode"].setdefault("channel_username", None)
                 data["subscription_mode"].setdefault(
                     "join_message",
-                    "⚠️ **عذراً يا {first_name}**\n\n"
-                    "يجب عليك الاشتراك في القناة أدناه لتتمكن من الكتابة في هذه المجموعة:\n"
-                    "{channel_link}\n\n"
+                    "⚠️ **عذراً يا {first_name}**
+
+"
+                    "يجب عليك الاشتراك في القناة أدناه لتتمكن من الكتابة في هذه المجموعة:
+"
+                    "{channel_link}
+
+"
                     "🔘 اضغط على الزر ثم عد وأرسل رسالتك."
                 )
                 data["subscription_mode"].setdefault(
                     "thank_you_message",
-                    "✅ شكراً لك يا {first_name} على اشتراكك!\n"
+                    "✅ شكراً لك يا {first_name} على اشتراكك!
+"
                     "يمكنك الآن التفاعل بحرية في المجموعة."
                 )
                 return data
@@ -210,7 +238,8 @@ async def start_web_server():
 
 def parse_button_markup(text):
     keyboard = []
-    lines = text.strip().split("\n")
+    lines = text.strip().split("
+")
     style_map = {"green": "success", "blue": "primary", "red": "danger"}
     for line in lines:
         row = []
@@ -379,7 +408,8 @@ async def start_command(update, context):
     if is_bot_admin(user_id):
         WAITING_STATES[user_id] = None
         await update.message.reply_text(
-            "أهلاً بك يا أدمن في لوحة التحكم الإدارية! 🛠️\nاختر من الأزرار أدناه للتحكم بالبوت:",
+            "أهلاً بك يا أدمن في لوحة التحكم الإدارية! 🛠️
+اختر من الأزرار أدناه للتحكم بالبوت:",
             reply_markup=get_main_admin_keyboard()
         )
     else:
@@ -419,15 +449,27 @@ async def button_click(update, context):
 
     elif action == "show_cmd_help":
         help_text = (
-            "📖 **دليل أوامر الإشراف السريعة للمجموعات:**\n\n"
-            "يمكنك استخدام هذه الأوامر مباشرة داخل المجموعة (بالرد على الرسالة):\n\n"
-            "• `/حظر` : حظر المستخدم نهائياً.\n"
-            "• `/حظر 10m` أو `/حظر 2h` : حظر مؤقت.\n"
-            "• `/كتم` أو `/كتم 30m` : كتم المستخدم.\n"
-            "• `/الغاء_الحظر` : إزالة الحظر عن المستخدم بالرد عليه.\n"
-            "• `/الغاء_الكتم` : السماح للمستخدم بالكتابة مجدداً بالرد عليه.\n\n"
+            "📖 **دليل أوامر الإشراف السريعة للمجموعات:**
+
+"
+            "يمكنك استخدام هذه الأوامر مباشرة داخل المجموعة (بالرد على الرسالة):
+
+"
+            "• `/حظر` : حظر المستخدم نهائياً.
+"
+            "• `/حظر 10m` أو `/حظر 2h` : حظر مؤقت.
+"
+            "• `/كتم` أو `/كتم 30m` : كتم المستخدم.
+"
+            "• `/الغاء_الحظر` : إزالة الحظر عن المستخدم بالرد عليه.
+"
+            "• `/الغاء_الكتم` : السماح للمستخدم بالكتابة مجدداً بالرد عليه.
+
+"
             "🆘 **نداء الاستغاثة:** إذا كتب الأعضاء كلمة النداء المحددة عدداً من المرات المتتالية "
-            "داخل المجموعة المستهدفة، يتم تفعيل الوضع الصامت تلقائياً.\n\n"
+            "داخل المجموعة المستهدفة، يتم تفعيل الوضع الصامت تلقائياً.
+
+"
             "📢 **الاشتراك الإجباري:** يمكنك إجبار أعضاء مجموعة معينة على الاشتراك في قناة معينة "
             "قبل السماح لهم بالكتابة."
         )
@@ -438,11 +480,17 @@ async def button_click(update, context):
         target = s.get("target_group")
         target_name = bot_data.get("groups", {}).get(str(target), "غير محددة ❌") if target else "غير محددة ❌"
         msg = (
-            "🔇 **إعدادات الوضع الصامت:**\n\n"
-            f"• المجموعة المستهدفة: {target_name}\n"
-            f"• التفعيل التلقائي: {'تفعيل' if s.get('enabled') else 'تعطيل'}\n"
-            f"• الجدول اليومي: من `{s.get('start_time')}` إلى `{s.get('end_time')}`\n"
-            f"• رسالة التنبيه:\n_{s.get('custom_message')}_"
+            "🔇 **إعدادات الوضع الصامت:**
+
+"
+            f"• المجموعة المستهدفة: {target_name}
+"
+            f"• التفعيل التلقائي: {'تفعيل' if s.get('enabled') else 'تعطيل'}
+"
+            f"• الجدول اليومي: من `{s.get('start_time')}` إلى `{s.get('end_time')}`
+"
+            f"• رسالة التنبيه:
+_{s.get('custom_message')}_"
         )
         await query.message.edit_text(msg, parse_mode="Markdown", reply_markup=get_silent_keyboard(bot_data))
 
@@ -499,7 +547,9 @@ async def button_click(update, context):
         try:
             await context.bot.send_message(
                 chat_id=int(target),
-                text=f"🔇 **تم تفعيل الوضع الصامت لمدة {minutes} دقيقة!**\n\n{custom_msg}",
+                text=f"🔇 **تم تفعيل الوضع الصامت لمدة {minutes} دقيقة!**
+
+{custom_msg}",
                 parse_mode="Markdown"
             )
         except Exception:
@@ -515,8 +565,11 @@ async def button_click(update, context):
             return
         WAITING_STATES[user_id] = "set_schedule"
         await query.message.edit_text(
-            "⏰ **أرسل وقت البدء والانتهاء للوضع الصامت بالشكل التالي:**\n\n"
-            "`22:00-07:00`\n"
+            "⏰ **أرسل وقت البدء والانتهاء للوضع الصامت بالشكل التالي:**
+
+"
+            "`22:00-07:00`
+"
             "(مع الأخذ بالاعتبار نظام 24 ساعة)",
             parse_mode="Markdown",
             reply_markup=get_back_keyboard("manage_silent")
@@ -531,13 +584,23 @@ async def button_click(update, context):
         target = r.get("target_group")
         target_name = bot_data.get("groups", {}).get(str(target), "غير محددة ❌") if target else "غير محددة ❌"
         msg = (
-            "🆘 **إعدادات نداء الاستغاثة:**\n\n"
-            f"• المجموعة المستهدفة: {target_name}\n"
-            f"• الحالة: {'مفعل' if r.get('enabled') else 'معطل'}\n"
-            f"• كلمة النداء: `{r.get('keyword')}`\n"
-            f"• عدد النداءات المطلوبة: {r.get('threshold')}\n"
-            f"• مدة الصمت التلقائي: {r.get('duration_minutes')} دقيقة\n"
-            f"• رسالة النداء:\n_{r.get('message')}_\n\n"
+            "🆘 **إعدادات نداء الاستغاثة:**
+
+"
+            f"• المجموعة المستهدفة: {target_name}
+"
+            f"• الحالة: {'مفعل' if r.get('enabled') else 'معطل'}
+"
+            f"• كلمة النداء: `{r.get('keyword')}`
+"
+            f"• عدد النداءات المطلوبة: {r.get('threshold')}
+"
+            f"• مدة الصمت التلقائي: {r.get('duration_minutes')} دقيقة
+"
+            f"• رسالة النداء:
+_{r.get('message')}_
+
+"
             "عند تكرار كلمة النداء من الأعضاء بالعدد المحدد، يتم تفعيل الوضع الصامت تلقائياً في المجموعة المستهدفة."
         )
         await query.message.edit_text(msg, parse_mode="Markdown", reply_markup=get_rescue_keyboard(bot_data))
@@ -592,12 +655,24 @@ async def button_click(update, context):
         target_name = bot_data.get("groups", {}).get(str(target), "غير محددة ❌") if target else "غير محددة ❌"
         channel = sub.get("channel_username") or sub.get("channel_id") or "غير محددة ❌"
         msg = (
-            "📢 **إعدادات الاشتراك الإجباري:**\n\n"
-            f"• الحالة: {'🟢 مفعل' if sub.get('enabled') else '🔴 معطل'}\n"
-            f"• المجموعة المستهدفة: {target_name}\n"
-            f"• القناة/المجموعة المطلوبة: `{channel}`\n\n"
-            f"• رسالة الاشتراك:\n_{sub.get('join_message')}_\n\n"
-            f"• رسالة الشكر:\n_{sub.get('thank_you_message')}_\n\n"
+            "📢 **إعدادات الاشتراك الإجباري:**
+
+"
+            f"• الحالة: {'🟢 مفعل' if sub.get('enabled') else '🔴 معطل'}
+"
+            f"• المجموعة المستهدفة: {target_name}
+"
+            f"• القناة/المجموعة المطلوبة: `{channel}`
+
+"
+            f"• رسالة الاشتراك:
+_{sub.get('join_message')}_
+
+"
+            f"• رسالة الشكر:
+_{sub.get('thank_you_message')}_
+
+"
             "💡 **تنبيه:** يجب أن يكون البوت **مشرفاً** في القناة المطلوبة ليستطيع التحقق من الاشتراكات."
         )
         await query.message.edit_text(msg, parse_mode="Markdown", reply_markup=get_subscription_keyboard(bot_data))
@@ -639,10 +714,16 @@ async def button_click(update, context):
     elif action == "sub_set_channel":
         WAITING_STATES[user_id] = "sub_set_channel"
         guide = (
-            "📢 **أرسل معرف القناة أو المجموعة المطلوب الاشتراك فيها:**\n\n"
-            "يمكنك إرسالها بأحد الصيغ التالية:\n"
-            "• ID رقمي: `-1001234567890`\n"
-            "• يوزرنيوم: `@channel_username`\n\n"
+            "📢 **أرسل معرف القناة أو المجموعة المطلوب الاشتراك فيها:**
+
+"
+            "يمكنك إرسالها بأحد الصيغ التالية:
+"
+            "• ID رقمي: `-1001234567890`
+"
+            "• يوزرنيوم: `@channel_username`
+
+"
             "⚠️ **يجب أن يكون البوت مشرفاً في تلك القناة/المجموعة.**"
         )
         await query.message.edit_text(guide, parse_mode="Markdown", reply_markup=get_back_keyboard("manage_subscription"))
@@ -650,11 +731,18 @@ async def button_click(update, context):
     elif action == "sub_set_join_msg":
         WAITING_STATES[user_id] = "sub_set_join_msg"
         guide = (
-            "✏️ **أرسل رسالة الاشتراك الإجباري الجديدة:**\n\n"
-            "يمكنك استخدام المتغيرات التالية:\n"
-            "• `{first_name}` : اسم العضو\n"
-            "• `{channel_link}` : رابط القناة/المجموعة المطلوبة\n\n"
-            "مثال:\n"
+            "✏️ **أرسل رسالة الاشتراك الإجباري الجديدة:**
+
+"
+            "يمكنك استخدام المتغيرات التالية:
+"
+            "• `{first_name}` : اسم العضو
+"
+            "• `{channel_link}` : رابط القناة/المجموعة المطلوبة
+
+"
+            "مثال:
+"
             "`عذراً يا {first_name}، يجب الاشتراك في {channel_link}`"
         )
         await query.message.edit_text(guide, parse_mode="Markdown", reply_markup=get_back_keyboard("manage_subscription"))
@@ -662,10 +750,16 @@ async def button_click(update, context):
     elif action == "sub_set_thank_msg":
         WAITING_STATES[user_id] = "sub_set_thank_msg"
         guide = (
-            "✏️ **أرسل رسالة الشكر الجديدة:**\n\n"
-            "يمكنك استخدام المتغير التالي:\n"
-            "• `{first_name}` : اسم العضو\n\n"
-            "مثال:\n"
+            "✏️ **أرسل رسالة الشكر الجديدة:**
+
+"
+            "يمكنك استخدام المتغير التالي:
+"
+            "• `{first_name}` : اسم العضو
+
+"
+            "مثال:
+"
             "`شكراً لك يا {first_name} على اشتراكك!`"
         )
         await query.message.edit_text(guide, parse_mode="Markdown", reply_markup=get_back_keyboard("manage_subscription"))
@@ -695,14 +789,25 @@ async def button_click(update, context):
     elif action == "btn_add_yes":
         WAITING_STATES[user_id] = "wait_for_btn_format"
         guide = (
-            "✏️ **أرسل قائمة أزرار الروابط بهذا التنسيق (مع تحديد الألوان اختيارياً):**\n\n"
-            "الزر 1 - http://example1.com - style:green\n"
-            "الزر 2 - http://example2.com - style:blue\n"
-            "الزر 3 - http://example3.com - style:red\n\n"
-            "🎨 **الألوان المتاحة:**\n"
-            "• `style:green` : لون أخضر 🟢\n"
-            "• `style:blue` : لون أزرق 🔵\n"
-            "• `style:red` : لون أحمر 🔴\n\n"
+            "✏️ **أرسل قائمة أزرار الروابط بهذا التنسيق (مع تحديد الألوان اختيارياً):**
+
+"
+            "الزر 1 - http://example1.com - style:green
+"
+            "الزر 2 - http://example2.com - style:blue
+"
+            "الزر 3 - http://example3.com - style:red
+
+"
+            "🎨 **الألوان المتاحة:**
+"
+            "• `style:green` : لون أخضر 🟢
+"
+            "• `style:blue` : لون أزرق 🔵
+"
+            "• `style:red` : لون أحمر 🔴
+
+"
             "💡 يمكنك أيضاً وضع أكثر من زر في نفس السطر بوضع الرمز `|` بينهما."
         )
         await query.message.edit_text(guide, parse_mode="Markdown", reply_markup=get_back_keyboard())
@@ -720,7 +825,8 @@ async def button_click(update, context):
             [InlineKeyboardButton("➕ إضافة كلمة", callback_data="add_word"), InlineKeyboardButton("🗑️ مسح الكل", callback_data="clear_words")],
             [InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")]
         ]
-        await query.message.edit_text(f"⛔ **الكلمات المحظورة:**\n`{words}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.edit_text(f"⛔ **الكلمات المحظورة:**
+`{words}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "add_word":
         WAITING_STATES[user_id] = "add_word"
@@ -737,7 +843,8 @@ async def button_click(update, context):
             [InlineKeyboardButton("➕ إضافة إيموجي", callback_data="add_emoji"), InlineKeyboardButton("🗑️ مسح الكل", callback_data="clear_emojis")],
             [InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")]
         ]
-        await query.message.edit_text(f"😀 **الإيموجيات المحظورة:**\n{emojis}", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.edit_text(f"😀 **الإيموجيات المحظورة:**
+{emojis}", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif action == "add_emoji":
         WAITING_STATES[user_id] = "add_emoji"
@@ -751,7 +858,10 @@ async def button_click(update, context):
     elif action == "manage_links":
         links = ", ".join(bot_data.get("banned_links", [])) or "لا توجد"
         await query.message.edit_text(
-            f"🔗 **إعدادات الروابط المحظورة:**\n\nالقائمة الحالية:\n`{links}`",
+            f"🔗 **إعدادات الروابط المحظورة:**
+
+القائمة الحالية:
+`{links}`",
             parse_mode="Markdown",
             reply_markup=get_links_keyboard(bot_data)
         )
@@ -814,7 +924,9 @@ async def execute_broadcast(context, user_id, status_msg, reply_markup):
             failed += 1
     TEMP_BROADCAST.pop(user_id, None)
     WAITING_STATES[user_id] = None
-    await status_msg.edit_text(f"✅ تمت الإذاعة بنجاح!\n- نجاح: {sent}\n- فشل: {failed}", reply_markup=get_back_keyboard())
+    await status_msg.edit_text(f"✅ تمت الإذاعة بنجاح!
+- نجاح: {sent}
+- فشل: {failed}", reply_markup=get_back_keyboard())
 
 
 async def handle_private_message(update, context):
@@ -840,7 +952,8 @@ async def handle_private_message(update, context):
     elif state == "wait_for_btn_format":
         btn_markup = parse_button_markup(update.message.text)
         if not btn_markup:
-            await update.message.reply_text("❌ التنسيق غير صحيح! التأكد من إرسال رابط صحيح (https://...)\nحاول مرة أخرى:")
+            await update.message.reply_text("❌ التنسيق غير صحيح! التأكد من إرسال رابط صحيح (https://...)
+حاول مرة أخرى:")
             return
         status_msg = await update.message.reply_text("⏳ جاري تحضير الإذاعة...")
         await execute_broadcast(context, user_id, status_msg, btn_markup)
@@ -957,9 +1070,12 @@ async def handle_private_message(update, context):
             await context.bot.get_chat(check_id)
         except Exception:
             await update.message.reply_text(
-                "⚠️ لم أتمكن من الوصول إلى القناة/المجموعة.\n"
-                "تأكد من:\n"
-                "1. أن المعرف صحيح.\n"
+                "⚠️ لم أتمكن من الوصول إلى القناة/المجموعة.
+"
+                "تأكد من:
+"
+                "1. أن المعرف صحيح.
+"
                 "2. أن البوت مشرف في تلك القناة/المجموعة.",
                 reply_markup=get_back_keyboard("manage_subscription")
             )
@@ -1122,8 +1238,12 @@ async def trigger_rescue_silent(context, chat_id, bot_data, rescue):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء الوضع الصامت", callback_data="cancel_silent")]])
     threshold = rescue.get("threshold", 3)
     text = (
-        f"🚨 **تم تفعيل الوضع الصامت تلقائياً** بسبب تكرار نداء الاستغاثة ({threshold}/{threshold})!\n\n"
-        f"{rescue.get('message', '')}\n\n"
+        f"🚨 **تم تفعيل الوضع الصامت تلقائياً** بسبب تكرار نداء الاستغاثة ({threshold}/{threshold})!
+
+"
+        f"{rescue.get('message', '')}
+
+"
         "يمكن لمشرفي المجموعة إلغاء الوضع الصامت بالضغط على الزر أدناه."
     )
     try:
@@ -1151,14 +1271,16 @@ async def handle_rescue_keyword(update, context, chat_id, bot_data, text):
     elif count == 1:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"🆘 تم رصد نداء استغاثة ({count}/{threshold})\nفي حال تكرر النداء سيتم تفعيل الوضع الصامت تلقائياً."
+            text=f"🆘 تم رصد نداء استغاثة ({count}/{threshold})
+في حال تكرر النداء سيتم تفعيل الوضع الصامت تلقائياً."
         )
     else:
         callers_text = "، ".join(track["callers"])
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                f"⚠️ تحذير: نداء استغاثة ({count}/{threshold})\n"
+                f"⚠️ تحذير: نداء استغاثة ({count}/{threshold})
+"
                 f"في حال كان النداء بدون سبب حقيقي، سيتم حظر من قام بالنداء عند تفعيل الوضع الصامت: {callers_text}"
             )
         )
@@ -1198,7 +1320,8 @@ async def group_filter(update, context):
                 await msg.delete()
                 custom_msg = bot_data["silent_mode"].get("custom_message", "🔇 الوضع الصامت مفعل حالياً!")
                 first_name = update.effective_user.first_name if update.effective_user else "العضو"
-                warn = await context.bot.send_message(chat_id=chat_id, text=f"عذراً يا {first_name}:\n{custom_msg}")
+                warn = await context.bot.send_message(chat_id=chat_id, text=f"عذراً يا {first_name}:
+{custom_msg}")
                 await asyncio.sleep(5)
                 await warn.delete()
             except Exception:
