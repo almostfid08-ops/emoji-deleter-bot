@@ -673,6 +673,4 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         keyboard = [[InlineKeyboardButton(f"👥 {g_title}", callback_data=f"bc_to_{g_id}")] for g_id, g_title in groups.items()]
         keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")])
-        await query.message.edit_text("🎯 **اختر المجموعة المستهدفة:**", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif action.startswith("bc_to_"):
+        await query.message.edit_text("🎯 **اختر المجموعة المستهدفة:**", reply_markup=
