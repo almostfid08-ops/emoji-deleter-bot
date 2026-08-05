@@ -1,5 +1,8 @@
+import os
 import logging
 import re
+from asyncio import create_task
+from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -13,21 +16,42 @@ from telegram.ext import (
 from telegram.constants import ChatMemberStatus
 from telegram.error import TelegramError
 
-# إعداد التسجيل (Logging)
+# إعداد التسجيل
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-TOKEN = "YOUR_BOT_TOKEN_HERE"
+# استخدام التوكن من متغيرات البيئة تلقائيًا لعدم تغيير هوية الكود أو المساس بالتوكن الأصلي
+TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
 
 # -------------------------------------------------------------------
-# 1. إدارة المجموعات والقنوات والتتبع (الحفاظ على الكود السابق)
+# 1. خادم ويب مصغر لاستجابة UptimeRobot ومنع توقف Render
+# -------------------------------------------------------------------
+
+async def handle_ping(request):
+    """نقطة نهاية للتحقق من أن البوت يعمل بصحة جيدة (Health Check)"""
+    return web.Response(text="Bot is running successfully!", status=200)
+
+async def start_web_server():
+    """تشغيل خادم Aiohttp خفيف في الخلفية لـ UptimeRobot"""
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Web server started on port {port} for UptimeRobot monitoring.")
+
+
+# -------------------------------------------------------------------
+# 2. إدارة المجموعات وتتبع المشرفين (بدون تغيير)
 # -------------------------------------------------------------------
 
 async def track_bot_admin_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """مُستمع يتم تفعيله عند تغيير حالة البوت داخل مجموعة أو قناة."""
+    """مُستمع يتبع تغييرات صلاحيات البوت في المجموعات"""
     result = update.my_chat_member
     if not result:
         return
@@ -47,7 +71,7 @@ async def track_bot_admin_groups(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def get_valid_admin_groups(context: ContextTypes.DEFAULT_TYPE) -> dict:
-    """جلب والتحقق الفعلي من المجموعات التي يملك فيها البوت صلاحيات الإدارة."""
+    """جلب قائمة المجموعات النشطة التي يملك فيها البوت صلاحية مشرف"""
     valid_groups = {}
     stored_groups = context.bot_data.get("admin_groups", {})
 
@@ -66,13 +90,12 @@ async def get_valid_admin_groups(context: ContextTypes.DEFAULT_TYPE) -> dict:
 
 
 # -------------------------------------------------------------------
-# 2. إصلاح مشكلة استقبال واستخراج رابط القناة بدون تعليق
+# 3. إصلاح معالجة رابط القناة وتفادي التعليق
 # -------------------------------------------------------------------
 
 def extract_channel_username(url_or_text: str) -> str:
-    """استخراج المعرف أو الرابط النظيف من النص المكتوب."""
+    """استخراج المعرف أو تنظيف الرابط"""
     text = url_or_text.strip()
-    # إذا كان الرابط مكتوب بصيغة t.me/username أو https://t.me/username
     match = re.search(r"(?:t\.me/|@)([a-zA-Z0-9_]{5,})", text)
     if match:
         return f"@{match.group(1)}"
@@ -82,22 +105,16 @@ def extract_channel_username(url_or_text: str) -> str:
 
 
 async def process_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    معالج استقبال رابط القناة المطلوبة للاشتراك الإجباري.
-    مُصلّح بالكامل لمنع تجمّد البوت وتأمين معالجة الأخطاء.
-    """
-    # التحقق مما إذا كان المسؤول في وضع انتظار إدخال الرابط
+    """معالجة الرابط بأمان مع حماية البوت من التوقف"""
     if not context.user_data.get("awaiting_channel_link"):
-        return  # تجاهل الرسائل العادية إذا لم يكن البوت ينتظر رابطًا
+        return
 
     user_input = update.message.text.strip()
     channel_identifier = extract_channel_username(user_input)
 
     try:
-        # محاولة جلب معلومات القناة للتحقق من وجودها وصحتها
         chat = await context.bot.get_chat(channel_identifier)
 
-        # حفظ معلومات القناة في context.bot_data
         context.bot_data["forced_channel_id"] = chat.id
         context.bot_data["forced_channel_title"] = chat.title
         context.bot_data["forced_channel_username"] = chat.username
@@ -105,7 +122,6 @@ async def process_channel_link(update: Update, context: ContextTypes.DEFAULT_TYP
             f"https://t.me/{chat.username}" if chat.username else user_input
         )
 
-        # إنهاء حالة الانتظار
         context.user_data["awaiting_channel_link"] = False
 
         keyboard = [
@@ -122,37 +138,29 @@ async def process_channel_link(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
     except TelegramError as e:
-        logger.error(f"خطأ أثناء التحقق من القناة: {e}")
-        # الاستجابة الفورية عند حدوث خطأ لمنع تجمّد البوت
+        logger.error(f"خطأ Telegram API: {e}")
         keyboard = [[InlineKeyboardButton("🔙 إلغاء والعودة", callback_data="main_menu")]]
         await update.message.reply_text(
             "❌ **تعذر الوصول إلى القناة!**\n\n"
-            "يرجى التأكد من:\n"
-            "1. صحة الرابط أو المعرف (مثال: `@MyChannel` أو `https://t.me/MyChannel`).\n"
-            "2. إضافة البوت كـ **مشرف** داخل القناة لتمكينه من التحقق من المشتركين.",
+            "تأكد من صحة المعرف/الرابط ومن إضافة البوت **كمشرف** داخل القناة.",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
     except Exception as e:
         logger.error(f"خطأ غير متوقع: {e}")
         context.user_data["awaiting_channel_link"] = False
-        await update.message.reply_text(
-            "⚠️ حدث خطأ غير متوقع أثناء معالجة الرابط. يرجى المحاولة مرة أخرى باستخدام /start"
-        )
+        await update.message.reply_text("⚠️ حدث خطأ أثناء المعالجة. أعد المحاولة عبر /start")
 
 
 # -------------------------------------------------------------------
-# 3. عرض رسالة الاشتراك الإجباري بالزر الاحترافي (Inline Button)
+# 4. عرض رسالة الاشتراك بالزر الشفاف
 # -------------------------------------------------------------------
 
 async def send_forced_subscribe_message(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """
-    دالة إرسال طلب الاشتراك للمستخدم بصيغة احترافية تتضمن زر القناة المباشر.
-    """
+    """إرسال زر الاشتراك الاحترافي داخل الرسالة"""
     channel_link = context.bot_data.get("forced_channel_link", "https://t.me/")
     channel_title = context.bot_data.get("forced_channel_title", "القناة الرسمية")
 
-    # إعداد الأزرار الاحترافية (Inline Keyboard)
     keyboard = [
         [InlineKeyboardButton(f"📢 اشترك في {channel_title}", url=channel_link)],
         [InlineKeyboardButton("🔄 تحقق من الاشتراك", callback_data="check_subscription")]
@@ -161,25 +169,25 @@ async def send_forced_subscribe_message(chat_id: int, context: ContextTypes.DEFA
     await context.bot.send_message(
         chat_id=chat_id,
         text="⚠️ **تنبيه: يجب عليك الاشتراك في القناة أولاً لاستخدام البوت.**\n\n"
-             "إضغط على الزر أدناه للانضمام، ثم اضغط على **تحقق من الاشتراك**:",
+             "اضغط على الزر أدناه للانضمام، ثم اضغط على **تحقق من الاشتراك**:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
 
 
 # -------------------------------------------------------------------
-# 4. واجهة التحكم والأزرار
+# 5. الواجهة الرئيسية والأزرار
 # -------------------------------------------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """أمر البدء وتنظيف حالة الانتظار."""
+    """أمر البدء"""
     context.user_data["awaiting_channel_link"] = False
 
     keyboard = [
         [InlineKeyboardButton("🎯 اختيار المجموعة المستهدفة", callback_data="select_target_group")],
         [InlineKeyboardButton("🔗 ضبط قناة الاشتراك الإجباري", callback_data="set_channel_link")]
     ]
-    
+
     if update.message:
         await update.message.reply_text(
             "مرحباً بك في لوحة تحكم ميزة الاشتراك الإجباري.",
@@ -193,7 +201,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_target_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض قائمة المجموعات التي يكون فيها البوت مشرفًا."""
+    """عرض المجموعات المتاحة"""
     query = update.callback_query
     await query.answer()
 
@@ -203,7 +211,7 @@ async def show_target_groups(update: Update, context: ContextTypes.DEFAULT_TYPE)
         keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")]]
         await query.edit_message_text(
             text="⚠️ **لم يتم العثور على أي مجموعة.**\n\n"
-                 "يرجى التأكد من إضافة البوت إلى المجموعة وتعيينه كـ **مشرف** أولاً.",
+                 "تأكد من إضافة البوت إلى المجموعة وتعيينه كـ **مشرف** أولاً.",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
@@ -225,7 +233,7 @@ async def show_target_groups(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج الأزرار التفاعلية."""
+    """معالج الضغط على الأزرار"""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -234,7 +242,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_target_groups(update, context)
 
     elif data == "set_channel_link":
-        # تفعيل حالة انتظار رابط القناة
         context.user_data["awaiting_channel_link"] = True
         keyboard = [[InlineKeyboardButton("🔙 إلغاء", callback_data="main_menu")]]
         await query.edit_message_text(
@@ -244,7 +251,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "preview_sub_button":
-        # معاينة كيفية ظهور الرسالة للجمهور
         await send_forced_subscribe_message(query.message.chat_id, context)
 
     elif data.startswith("select_group_"):
@@ -265,25 +271,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------------------------------------------------------
-# 5. تشغيل البوت وإضافة المعالجات
+# 6. التشغيل وربط الاستجابات
 # -------------------------------------------------------------------
 
+async def post_init(application: Application):
+    """بدء خادم الويب الخاص بـ UptimeRobot فور تشغيل البوت"""
+    create_task(start_web_server())
+
 def main():
-    application = Application.builder().token(TOKEN).build()
+    application = Application.builder().token(TOKEN).post_init(post_init).build()
 
-    # معالج حالة المشرف للمجموعات والقنوات
     application.add_handler(ChatMemberHandler(track_bot_admin_groups, ChatMemberHandler.MY_CHAT_MEMBER))
-
-    # الأوامر والأزرار
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
-
-    # معالج النصوص لاستقبال رابط القناة مع التأكد من إدراج المصفى الصحيح
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_channel_link))
 
-    # بدء التشغيل
     application.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     main()
