@@ -1,3 +1,4 @@
+
 import os
 import logging
 import asyncio
@@ -239,6 +240,39 @@ def parse_button_markup(text):
     return InlineKeyboardMarkup(keyboard) if keyboard else None
 
 
+def escape_markdown(text):
+    """
+    يهرّب الرموز الخاصة بصيغة Markdown القديمة (legacy) حتى لا تتسبب عناوين القنوات/المجموعات
+    (التي لا نتحكم بمحتواها) في كسر تنسيق الرسالة وفشل الإرسال بصمت.
+    الرموز الخاصة في هذا الوضع: _ * ` [ ]
+    """
+    if not text:
+        return text
+    return re.sub(r'([_*`\[\]])', r'\\\1', str(text))
+
+
+async def safe_edit_text(message, text, reply_markup=None, parse_mode='Markdown'):
+    """يحاول تعديل الرسالة بصيغة Markdown، وإذا فشل (لأي سبب) يعيد المحاولة كنص عادي بدل الفشل الصامت."""
+    try:
+        await message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except Exception:
+        try:
+            await message.edit_text(text, reply_markup=reply_markup)
+        except Exception:
+            logging.exception("فشل تعديل الرسالة (safe_edit_text)")
+
+
+async def safe_reply_text(message, text, reply_markup=None, parse_mode='Markdown'):
+    """يحاول الرد بصيغة Markdown، وإذا فشل (لأي سبب) يعيد المحاولة كنص عادي بدل الفشل الصامت."""
+    try:
+        await message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except Exception:
+        try:
+            await message.reply_text(text, reply_markup=reply_markup)
+        except Exception:
+            logging.exception("فشل إرسال الرد (safe_reply_text)")
+
+
 def extract_forwarded_channel(message):
     """
     يحاول استخراج معلومات القناة (Chat) من رسالة مُعاد توجيهها (Forward).
@@ -398,10 +432,13 @@ def get_force_sub_manage_keyboard(gid, cfg):
     status = "🟢 مفعل" if cfg.get("enabled") else "🔴 معطل"
     keyboard = [
         [InlineKeyboardButton(f"الحالة: {status} (اضغط للتبديل)", callback_data=f"fs_toggle_{gid}")],
-        [InlineKeyboardButton("✏️ تعديل/تغيير القناة", callback_data=f"fs_edit_channel_{gid}")],
-        [InlineKeyboardButton("🗑️ حذف الإعداد", callback_data=f"fs_delete_{gid}")],
-        [InlineKeyboardButton("🔙 رجوع لقائمة الاشتراك الإجباري", callback_data="manage_force_sub")]
     ]
+    # زر واضح ومباشر لإلغاء (تعطيل) الاشتراك الإجباري لهذه المجموعة تحديداً، بدون حذف الإعدادات المحفوظة
+    if cfg.get("enabled"):
+        keyboard.append([InlineKeyboardButton("❌ إلغاء الاشتراك الإجباري لهذه المجموعة", callback_data=f"fs_disable_{gid}")])
+    keyboard.append([InlineKeyboardButton("✏️ تعديل/تغيير القناة", callback_data=f"fs_edit_channel_{gid}")])
+    keyboard.append([InlineKeyboardButton("🗑️ حذف الإعداد نهائياً", callback_data=f"fs_delete_{gid}")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع لقائمة الاشتراك الإجباري", callback_data="manage_force_sub")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -414,11 +451,13 @@ def get_force_sub_delete_confirm_keyboard(gid):
 
 
 def format_force_sub_info(gid, cfg, groups):
-    gname = groups.get(gid, f"مجموعة #{gid}")
-    channel_display = cfg.get("channel_title") or "غير معروف"
+    # تهريب أسماء المجموعة والقناة لأنها نصوص خارجة عن تحكمنا وقد تحتوي رموز Markdown خاصة
+    # (كانت هذه هي السبب في فشل الرد بصمت عندما يحتوي اسم القناة على رمز مثل _ أو * أو `)
+    gname = escape_markdown(groups.get(gid, f"مجموعة #{gid}"))
+    channel_display = escape_markdown(cfg.get("channel_title") or "غير معروف")
     username = cfg.get("channel_username")
     if username:
-        channel_display += f" (@{username})"
+        channel_display += f" (@{escape_markdown(username)})"
     return (
         "📢 **إعدادات الاشتراك الإجباري**\n\n"
         f"• المجموعة: {gname}\n"
@@ -768,9 +807,9 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not cfg:
             await query.message.edit_text("❌ لا يوجد إعداد لهذه المجموعة.", reply_markup=get_force_sub_list_keyboard(bot_data))
             return
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             format_force_sub_info(gid, cfg, bot_data.get("groups", {})),
-            parse_mode='Markdown',
             reply_markup=get_force_sub_manage_keyboard(gid, cfg)
         )
 
@@ -783,9 +822,25 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cfg["enabled"] = not cfg.get("enabled", False)
         cfg["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         save_data(bot_data)
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             format_force_sub_info(gid, cfg, bot_data.get("groups", {})),
-            parse_mode='Markdown',
+            reply_markup=get_force_sub_manage_keyboard(gid, cfg)
+        )
+
+    elif action.startswith("fs_disable_"):
+        # زر إلغاء صريح: يعطّل الاشتراك الإجباري لهذه المجموعة تحديداً فوراً (بدون حذف الإعداد المحفوظ)
+        gid = action.replace("fs_disable_", "")
+        cfg = bot_data.get("force_sub_groups", {}).get(gid)
+        if not cfg:
+            await query.message.edit_text("❌ لا يوجد إعداد لهذه المجموعة.", reply_markup=get_force_sub_list_keyboard(bot_data))
+            return
+        cfg["enabled"] = False
+        cfg["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        save_data(bot_data)
+        await safe_edit_text(
+            query.message,
+            "✅ تم إلغاء الاشتراك الإجباري لهذه المجموعة.\n\n" + format_force_sub_info(gid, cfg, bot_data.get("groups", {})),
             reply_markup=get_force_sub_manage_keyboard(gid, cfg)
         )
 
@@ -1107,62 +1162,79 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
     elif state.startswith("fs_forward_channel_"):
         gid = state.replace("fs_forward_channel_", "")
 
-        channel_chat = extract_forwarded_channel(update.message)
-        if not channel_chat:
-            await update.message.reply_text(
-                "❌ لم يتم العثور على معلومات قناة في هذه الرسالة.\n"
-                "يرجى إعادة توجيه (Forward) رسالة فعلية من داخل القناة مباشرة، وليس كتابتها أو نسخها يدوياً.",
-                reply_markup=get_back_keyboard("manage_force_sub")
-            )
-            return
-
+        # نغلّف الخطوة بالكامل بمعالجة أخطاء شاملة حتى لا يحدث "عدم رد" صامت من البوت
+        # مهما كان سبب أي عطل غير متوقع (مشاكل شبكة، صلاحيات، تنسيق النص...الخ).
         try:
-            bot_member = await context.bot.get_chat_member(channel_chat.id, context.bot.id)
-            if bot_member.status not in ['administrator', 'creator']:
+            channel_chat = extract_forwarded_channel(update.message)
+            if not channel_chat:
                 await update.message.reply_text(
-                    "❌ البوت ليس مشرفاً داخل هذه القناة.\n"
-                    "يرجى ترقية البوت إلى مشرف داخل القناة أولاً (ويفضّل منحه صلاحية دعوة الأعضاء)، ثم أعد إرسال التوجيه.",
+                    "❌ لم يتم العثور على معلومات قناة في هذه الرسالة.\n\n"
+                    "تأكد من أنك تقوم بإعادة توجيه (Forward) حقيقية لرسالة من داخل القناة نفسها "
+                    "(وليس نسخ/لصق النص، وليست رسالة من مجموعة أو من مستخدم عادي).\n\n"
+                    "💡 إن استمرت المشكلة: افتح القناة مباشرة، اختر أي منشور بها، ثم اضغط Forward → اختر هذا البوت.",
                     reply_markup=get_back_keyboard("manage_force_sub")
                 )
                 return
-        except Exception:
-            await update.message.reply_text(
-                "❌ تعذّر التحقق من صلاحيات البوت داخل القناة.\n"
-                "تأكد من أن البوت عضو ومشرف في القناة، ثم أعد المحاولة.",
-                reply_markup=get_back_keyboard("manage_force_sub")
-            )
-            return
 
-        # إذا كانت القناة خاصة (بدون يوزر عام)، نحاول إنشاء رابط دعوة يستخدمه الأعضاء للانضمام
-        invite_link = None
-        if not channel_chat.username:
             try:
-                invite_obj = await context.bot.create_chat_invite_link(channel_chat.id)
-                invite_link = invite_obj.invite_link
+                bot_member = await context.bot.get_chat_member(channel_chat.id, context.bot.id)
+                if bot_member.status not in ['administrator', 'creator']:
+                    await update.message.reply_text(
+                        "❌ البوت ليس مشرفاً داخل هذه القناة.\n"
+                        "يرجى ترقية البوت إلى مشرف داخل القناة أولاً (ويفضّل منحه صلاحية دعوة الأعضاء)، ثم أعد إرسال التوجيه.",
+                        reply_markup=get_back_keyboard("manage_force_sub")
+                    )
+                    return
+            except Exception as e:
+                logging.exception("فشل التحقق من صلاحيات البوت داخل القناة")
+                await update.message.reply_text(
+                    "❌ تعذّر التحقق من صلاحيات البوت داخل القناة.\n"
+                    "تأكد من أن البوت عضو ومشرف في القناة، ثم أعد المحاولة.\n"
+                    f"(تفاصيل تقنية: {e})",
+                    reply_markup=get_back_keyboard("manage_force_sub")
+                )
+                return
+
+            # إذا كانت القناة خاصة (بدون يوزر عام)، نحاول إنشاء رابط دعوة يستخدمه الأعضاء للانضمام
+            invite_link = None
+            if not channel_chat.username:
+                try:
+                    invite_obj = await context.bot.create_chat_invite_link(channel_chat.id)
+                    invite_link = invite_obj.invite_link
+                except Exception:
+                    invite_link = None
+
+            WAITING_STATES[user_id] = None
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+            fs_groups = bot_data.setdefault("force_sub_groups", {})
+            existing = fs_groups.get(gid)
+
+            fs_groups[gid] = {
+                "channel_id": channel_chat.id,
+                "channel_title": channel_chat.title or "قناة بدون اسم",
+                "channel_username": channel_chat.username,
+                "invite_link": invite_link,
+                "enabled": existing.get("enabled", True) if existing else True,
+                "created_at": existing.get("created_at", now_str) if existing else now_str,
+                "updated_at": now_str
+            }
+            save_data(bot_data)
+
+            await safe_reply_text(
+                update.message,
+                "✅ تم ربط القناة بنجاح!\n\n" + format_force_sub_info(gid, fs_groups[gid], bot_data.get("groups", {})),
+                reply_markup=get_force_sub_manage_keyboard(gid, fs_groups[gid])
+            )
+        except Exception as e:
+            logging.exception("خطأ غير متوقع أثناء ربط القناة بالاشتراك الإجباري")
+            WAITING_STATES[user_id] = None
+            try:
+                await update.message.reply_text(
+                    f"⚠️ حدث خطأ غير متوقع أثناء معالجة القناة: {e}\nيرجى المحاولة مرة أخرى.",
+                    reply_markup=get_back_keyboard("manage_force_sub")
+                )
             except Exception:
-                invite_link = None
-
-        WAITING_STATES[user_id] = None
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-        fs_groups = bot_data.setdefault("force_sub_groups", {})
-        existing = fs_groups.get(gid)
-
-        fs_groups[gid] = {
-            "channel_id": channel_chat.id,
-            "channel_title": channel_chat.title or "قناة بدون اسم",
-            "channel_username": channel_chat.username,
-            "invite_link": invite_link,
-            "enabled": existing.get("enabled", True) if existing else True,
-            "created_at": existing.get("created_at", now_str) if existing else now_str,
-            "updated_at": now_str
-        }
-        save_data(bot_data)
-
-        await update.message.reply_text(
-            "✅ تم ربط القناة بنجاح!\n\n" + format_force_sub_info(gid, fs_groups[gid], bot_data.get("groups", {})),
-            parse_mode='Markdown',
-            reply_markup=get_force_sub_manage_keyboard(gid, fs_groups[gid])
-        )
+                pass
 
 
 # === 8. أوامر الإشراف السريعة للمجموعات ===
@@ -1542,7 +1614,24 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delete_and_warn(msg, context, chat_id, first_name, reason)
 
 
-# === 10. تشغيل البوت ===
+# === 10. معالج أخطاء عام (شبكة أمان) ===
+async def global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    يلتقط أي استثناء غير متوقع يحدث داخل أي معالج (Handler) في البوت ويسجّله،
+    ويحاول إعلام المستخدم بدل ترك الطلب بدون أي رد (وهو ما كان يسبب انطباع 'البوت لا يرد').
+    """
+    logging.error("حدث استثناء غير متوقع أثناء معالجة تحديث:", exc_info=context.error)
+    try:
+        if isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text(
+                "⚠️ حدث خطأ غير متوقع أثناء تنفيذ هذا الإجراء. يرجى المحاولة مرة أخرى، "
+                "وفي حال تكرر الخطأ يرجى التواصل مع المطور."
+            )
+    except Exception:
+        pass
+
+
+# === 11. تشغيل البوت ===
 async def main():
     if not BOT_TOKEN:
         print("خطأ: لم يتم ضبط BOT_TOKEN!")
@@ -1559,6 +1648,8 @@ async def main():
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.Regex(r"^/(حظر|كتم|الغاء_الحظر|الغاء_الكتم|ban|mute|unban|unmute)"), admin_actions_handler))
 
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, group_filter))
+
+    app.add_error_handler(global_error_handler)
 
     print("البوت يعمل بنجاح...")
     await app.initialize()
