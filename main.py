@@ -1,6 +1,5 @@
 import os
 import logging
-import re
 from asyncio import create_task
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -22,20 +21,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# استخدام التوكن من متغيرات البيئة تلقائيًا لعدم تغيير هوية الكود أو المساس بالتوكن الأصلي
+# يعتمد على التوكن المسجل في بيئة التشغيل أو التوكن الخاص بك تلقائيًا
 TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
 
 # -------------------------------------------------------------------
-# 1. خادم ويب مصغر لاستجابة UptimeRobot ومنع توقف Render
+# 1. خادم ويب مصغر لمنع توقف Render والاستجابة لـ UptimeRobot
 # -------------------------------------------------------------------
 
 async def handle_ping(request):
-    """نقطة نهاية للتحقق من أن البوت يعمل بصحة جيدة (Health Check)"""
-    return web.Response(text="Bot is running successfully!", status=200)
+    return web.Response(text="Bot is active!", status=200)
 
 async def start_web_server():
-    """تشغيل خادم Aiohttp خفيف في الخلفية لـ UptimeRobot"""
     app = web.Application()
     app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
@@ -43,15 +40,13 @@ async def start_web_server():
     port = int(os.getenv("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"Web server started on port {port} for UptimeRobot monitoring.")
 
 
 # -------------------------------------------------------------------
-# 2. إدارة المجموعات وتتبع المشرفين (بدون تغيير)
+# 2. إدارة المجموعات وتتبع المشرفين
 # -------------------------------------------------------------------
 
 async def track_bot_admin_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """مُستمع يتبع تغييرات صلاحيات البوت في المجموعات"""
     result = update.my_chat_member
     if not result:
         return
@@ -71,7 +66,6 @@ async def track_bot_admin_groups(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def get_valid_admin_groups(context: ContextTypes.DEFAULT_TYPE) -> dict:
-    """جلب قائمة المجموعات النشطة التي يملك فيها البوت صلاحية مشرف"""
     valid_groups = {}
     stored_groups = context.bot_data.get("admin_groups", {})
 
@@ -90,79 +84,105 @@ async def get_valid_admin_groups(context: ContextTypes.DEFAULT_TYPE) -> dict:
 
 
 # -------------------------------------------------------------------
-# 3. إصلاح معالجة رابط القناة وتفادي التعليق
+# 3. معالجة التوجيه (Forward) والتحقق من صلاحيات القناة وإنشاء الرابط
 # -------------------------------------------------------------------
 
-def extract_channel_username(url_or_text: str) -> str:
-    """استخراج المعرف أو تنظيف الرابط"""
-    text = url_or_text.strip()
-    match = re.search(r"(?:t\.me/|@)([a-zA-Z0-9_]{5,})", text)
-    if match:
-        return f"@{match.group(1)}"
-    if text.startswith("@"):
-        return text
-    return text
-
-
-async def process_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالجة الرابط بأمان مع حماية البوت من التوقف"""
-    if not context.user_data.get("awaiting_channel_link"):
+async def process_channel_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    تستقبل الرسالة الموجهة، تستخرج ID القناة، تتحقق من صلاحيات الإدارة،
+    وتولد رابط دعوة أو تستخدم المعرف العام دون أي تعليق للبوت.
+    """
+    if not context.user_data.get("awaiting_channel_forward"):
         return
 
-    user_input = update.message.text.strip()
-    channel_identifier = extract_channel_username(user_input)
+    msg = update.message
+    keyboard_cancel = [[InlineKeyboardButton("🔙 إلغاء والعودة", callback_data="main_menu")]]
+
+    # 1. التحقق من أن الرسالة موجهة بالفعل من قناة
+    forward_chat = msg.forward_from_chat
+    if not forward_chat or forward_chat.type != "channel":
+        await msg.reply_text(
+            "⚠️ **الرسالة ليست موجهة من قناة!**\n\n"
+            "يرجى القيام بـ **توجيه (Forward)** أي رسالة من القناة المطلوبة مباشرة إلى هنا.",
+            reply_markup=InlineKeyboardMarkup(keyboard_cancel),
+            parse_mode="Markdown"
+        )
+        return
+
+    channel_id = forward_chat.id
+    channel_title = forward_chat.title
 
     try:
-        chat = await context.bot.get_chat(channel_identifier)
+        # 2. التحقق من أن البوت مشرف في القناة
+        bot_member = await context.bot.get_chat_member(channel_id, context.bot.id)
+        if bot_member.status != ChatMemberStatus.ADMINISTRATOR:
+            await msg.reply_text(
+                f"❌ **البوت ليس مشرفًا في القناة:** ({channel_title})\n\n"
+                "يرجى رفع البوت كـ **مشرف (Administrator)** داخل القناة أولاً مع صلاحية إضافة المشتركين/إنشاء الرابط، ثم قم بتوجيه الرسالة مرة أخرى.",
+                reply_markup=InlineKeyboardMarkup(keyboard_cancel),
+                parse_mode="Markdown"
+            )
+            return
 
-        context.bot_data["forced_channel_id"] = chat.id
-        context.bot_data["forced_channel_title"] = chat.title
-        context.bot_data["forced_channel_username"] = chat.username
-        context.bot_data["forced_channel_link"] = (
-            f"https://t.me/{chat.username}" if chat.username else user_input
-        )
+        # 3. إنشاء رابط القناة (رابط عام إن وجد، أو رابط دعوة خاص إن كانت القناة خاصة)
+        if forward_chat.username:
+            invite_link = f"https://t.me/{forward_chat.username}"
+        else:
+            # توليد رابط دعوة صالح للقنوات الخاصة
+            invite_link = await context.bot.export_chat_invite_link(channel_id)
 
-        context.user_data["awaiting_channel_link"] = False
+        # 4. حفظ بيانات القناة المؤكدة
+        context.bot_data["forced_channel_id"] = channel_id
+        context.bot_data["forced_channel_title"] = channel_title
+        context.bot_data["forced_channel_link"] = invite_link
+
+        # إنهاء حالة الانتظار
+        context.user_data["awaiting_channel_forward"] = False
 
         keyboard = [
             [InlineKeyboardButton("📢 معاينة زر الاشتراك", callback_data="preview_sub_button")],
             [InlineKeyboardButton("🔙 الصفحة الرئيسية", callback_data="main_menu")]
         ]
 
-        await update.message.reply_text(
-            f"✅ **تم ضبط قناة الاشتراك الإجباري بنجاح!**\n\n"
-            f"📌 **القناة:** {chat.title}\n"
-            f"🆔 **المعرف/الرابط:** {channel_identifier}",
+        await msg.reply_text(
+            f"✅ **تم ربط القناة بنجاح!**\n\n"
+            f"📌 **القناة:** {channel_title}\n"
+            f"🆔 **المعرف الرقمي:** `{channel_id}`",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
 
     except TelegramError as e:
-        logger.error(f"خطأ Telegram API: {e}")
-        keyboard = [[InlineKeyboardButton("🔙 إلغاء والعودة", callback_data="main_menu")]]
-        await update.message.reply_text(
-            "❌ **تعذر الوصول إلى القناة!**\n\n"
-            "تأكد من صحة المعرف/الرابط ومن إضافة البوت **كمشرف** داخل القناة.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+        logger.error(f"خطأ أثناء التعامل مع القناة: {e}")
+        await msg.reply_text(
+            "❌ **تعذر إنشاء رابط القناة أو الحصول على الصلاحيات!**\n\n"
+            "تأكد من إعطاء البوت جميع صلاحيات المشرف الكافية داخل القناة ثم أعد المحاولة.",
+            reply_markup=InlineKeyboardMarkup(keyboard_cancel),
             parse_mode="Markdown"
         )
     except Exception as e:
         logger.error(f"خطأ غير متوقع: {e}")
-        context.user_data["awaiting_channel_link"] = False
-        await update.message.reply_text("⚠️ حدث خطأ أثناء المعالجة. أعد المحاولة عبر /start")
+        context.user_data["awaiting_channel_forward"] = False
+        await msg.reply_text(
+            "⚠️ حدث خطأ غير متوقع. يرجى إعادة المحاولة من القائمة الرئيسية عبر /start",
+            reply_markup=InlineKeyboardMarkup(keyboard_cancel)
+        )
 
 
 # -------------------------------------------------------------------
-# 4. عرض رسالة الاشتراك بالزر الشفاف
+# 4. بناء زر الاشتراك الاحترافي (Inline Button فقط)
 # -------------------------------------------------------------------
 
 async def send_forced_subscribe_message(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """إرسال زر الاشتراك الاحترافي داخل الرسالة"""
+    """
+    تنشئ زر شفاف احترافي يحتوي على الرابط المباشر دون إظهار أي نص للرابط.
+    """
     channel_link = context.bot_data.get("forced_channel_link", "https://t.me/")
     channel_title = context.bot_data.get("forced_channel_title", "القناة الرسمية")
 
+    # زر مخصص ينقل المستخدم مباشرة للقناة بدون ظهور الرابط كنص
     keyboard = [
-        [InlineKeyboardButton(f"📢 اشترك في {channel_title}", url=channel_link)],
+        [InlineKeyboardButton(f"📢 اشترك في القناة ({channel_title})", url=channel_link)],
         [InlineKeyboardButton("🔄 تحقق من الاشتراك", callback_data="check_subscription")]
     ]
 
@@ -176,16 +196,15 @@ async def send_forced_subscribe_message(chat_id: int, context: ContextTypes.DEFA
 
 
 # -------------------------------------------------------------------
-# 5. الواجهة الرئيسية والأزرار
+# 5. لوحة التحكم والأزرار التفاعلية
 # -------------------------------------------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """أمر البدء"""
-    context.user_data["awaiting_channel_link"] = False
+    context.user_data["awaiting_channel_forward"] = False
 
     keyboard = [
         [InlineKeyboardButton("🎯 اختيار المجموعة المستهدفة", callback_data="select_target_group")],
-        [InlineKeyboardButton("🔗 ضبط قناة الاشتراك الإجباري", callback_data="set_channel_link")]
+        [InlineKeyboardButton("🔗 ضبط قناة الاشتراك الإجباري", callback_data="set_channel_forward")]
     ]
 
     if update.message:
@@ -201,7 +220,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_target_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض المجموعات المتاحة"""
     query = update.callback_query
     await query.answer()
 
@@ -233,7 +251,6 @@ async def show_target_groups(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج الضغط على الأزرار"""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -241,11 +258,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "select_target_group":
         await show_target_groups(update, context)
 
-    elif data == "set_channel_link":
-        context.user_data["awaiting_channel_link"] = True
+    elif data == "set_channel_forward":
+        # تفعيل انتظار توجيه الرسالة
+        context.user_data["awaiting_channel_forward"] = True
         keyboard = [[InlineKeyboardButton("🔙 إلغاء", callback_data="main_menu")]]
         await query.edit_message_text(
-            text="📢 **أرسل الآن رابط القناة أو معرفها** (مثال: `@MyChannel` أو `https://t.me/MyChannel`):",
+            text="📢 **قم الآن بتوجيه (Forward) أي رسالة من القناة المطلوبة إلى هذا الشات مباشرة:**",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
@@ -266,16 +284,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "main_menu":
-        context.user_data["awaiting_channel_link"] = False
+        context.user_data["awaiting_channel_forward"] = False
         await start(update, context)
 
 
 # -------------------------------------------------------------------
-# 6. التشغيل وربط الاستجابات
+# 6. تشغيل التطبيق
 # -------------------------------------------------------------------
 
 async def post_init(application: Application):
-    """بدء خادم الويب الخاص بـ UptimeRobot فور تشغيل البوت"""
     create_task(start_web_server())
 
 def main():
@@ -284,7 +301,9 @@ def main():
     application.add_handler(ChatMemberHandler(track_bot_admin_groups, ChatMemberHandler.MY_CHAT_MEMBER))
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_channel_link))
+    
+    # التقاط أي رسالة موجهة أو نصية معالجتها في الدالة المخصصة
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, process_channel_forward))
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
