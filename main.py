@@ -61,6 +61,60 @@ NON_ADMIN_SPAM_TEXT = (
     "شكراً لتفهمك 🙏"
 )
 
+# === قائمة الكلمات/العبارات المستهدفة الافتراضية لنظام "مراقبة الكلمات" (ميزة جديدة) ===
+# هذه القائمة لا تُستخدم في أي مكان آخر من البوت، وهي مستقلة تماماً عن قائمة "الكلمات المحظورة" (words) الأصلية.
+WATCH_WORDS_DEFAULT = [
+    # أولاً — صيغ كلمة جروب
+    "جروب", "قروب", "ڨروب", "غروب", "group", "Groupe", "گروب", "قروبنا", "جروبنا",
+    "قروبهم", "جروبهم", "قروبكم", "جروبكم", "جروبك", "الجروب", "القروب", "الغروب",
+    "le groupe", "notre groupe", "mon groupe", "leur groupe", "votre groupe",
+
+    # ثانياً — صيغ كلمة مجموعة
+    "مجموعة", "المجموعة", "مجموعتنا", "مجموعتهم", "مجموعتكم", "مجموعتك",
+    "مجموعة خاصة", "المجموعة الخاصة", "مجموعتنا الخاصة", "مجموعة التلاميذ",
+    "مجموعة الطلبة", "مجموعة الدراسة", "مجموعة المراجعة", "مجموعة الباك",
+    "مجموعة القسم", "مجموعة خاصة بنا",
+
+    # ثالثاً — العبارات الجزائرية المتعلقة بالجروب/المجموعة
+    "الجروب تاعنا", "القروب تاعنا", "الجروب تاعهم", "القروب تاعهم", "الجروب تاعكم",
+    "القروب تاعكم", "الجروب تاعي", "القروب تاعي", "جروب تاعنا", "قروب تاعنا",
+    "الجروب لي تاعنا", "الجروب لي درناه", "الجروب لي عندنا", "الجروب الخاص بينا",
+    "المجموعة تاعنا", "المجموعة لي عندنا", "المجموعة لي درناها", "مجموعة تاع التلاميذ",
+    "مجموعة التلاميذ تاعنا",
+
+    # رابعاً — عبارات الدعوة أو الإشارة إلى الجروب
+    "انضم للجروب تاعنا", "دخل للجروب", "ادخل للقروب", "انضم لقروبنا", "تعال للجروب",
+    "روح للجروب", "شوف الجروب تاعنا", "هذا هو الجروب تاعنا", "هذا قروبنا", "هذا جروبنا",
+    "رابط الجروب", "وين نلقى الجروب؟", "وين راه الجروب؟", "وين القروب؟",
+    "عندنا جروب خاص", "عندنا قروب خاص", "درنا جروب", "فتحنا جروب", "صايبنا جروب",
+    "أنشأنا مجموعة", "هذه مجموعتنا", "هذه المجموعة الخاصة بنا", "مجموعة خاصة بالتلاميذ",
+    "مجموعة خاصة بالطلبة", "مجموعة الدراسة تاعنا", "قروب الدراسة", "جروب المراجعة",
+    "جروب الباك", "جروب التلاميذ",
+
+    # خامساً — العبارات الفرنسية
+    "groupe privé", "groupe d’étude", "groupe des élèves", "groupe des étudiants",
+    "groupe de révision", "groupe du bac", "groupe de classe", "notre groupe privé",
+    "rejoindre le groupe", "rejoindre notre groupe", "entrer dans le groupe",
+    "lien du groupe", "lien de notre groupe", "créer un groupe", "on a créé un groupe",
+    "notre petit groupe", "groupe entre nous",
+
+    # سادساً — الفرنسية + الدارجة/العربية
+    "groupe تاعنا", "groupe ta3na", "groupe ta3hom", "groupe ta3kom",
+    "groupe privé تاعنا", "groupe privé ta3na", "le groupe تاعنا", "le groupe ta3na",
+    "notre groupe تاعنا", "groupe bac", "group ta3na", "group ta3hom", "group privé",
+    "groupe الخاص", "groupe تاع القسم", "le groupe تاع القسم",
+
+    # سابعاً — الكتابة بالدارجة اللاتينية (Arabizi)
+    "groupe ta3i", "groupe ta3k", "groupe khass", "groupe privé ta3na",
+    "groupe dyalna", "groupe dyalhom", "group dyalna", "groupe les élèves",
+    "groupe bac ta3na", "groupe révision ta3na",
+
+    # ثامناً — عبارات الدعوة المباشرة
+    "ادخل عندنا", "انضم لينا", "تعال للمجموعة", "رابطنا هنا", "هذا رابطنا",
+    "الرابط تاعنا", "دخل معانا", "كون معانا", "انضم لينا في الخاص",
+    "عندنا مجموعة خاصة", "عندنا جروب للتلاميذ",
+]
+
 
 # === 1. إدارة قاعدة البيانات ===
 def default_data():
@@ -93,7 +147,15 @@ def default_data():
         # إعدادات الاشتراك الإجباري: كل مجموعة (بالمعرّف كـ نص) لها إعداد مستقل خاص بها
         # المفتاح = group_id (str) → { channel_id, channel_title, channel_username, invite_link,
         #                              enabled, created_at, updated_at }
-        "force_sub_groups": {}
+        "force_sub_groups": {},
+        # إعدادات نظام "مراقبة الكلمات" (ميزة جديدة) - مستقلة تماماً عن قائمة "words" الأصلية
+        "watch_words": {
+            "enabled": True,
+            "words": list(WATCH_WORDS_DEFAULT),
+            # قائمة معرّفات المجموعات (Chat ID كنص) التي يعمل بها نظام مراقبة الكلمات فقط.
+            # إذا كانت القائمة فارغة، فالنظام لا يعمل في أي مجموعة (لا يعمل تلقائياً في الكل).
+            "target_groups": []
+        }
     }
 
 
@@ -140,6 +202,12 @@ def load_data():
 
                 # الاشتراك الإجباري (ميزة جديدة) - لا يؤثر على أي إعداد قديم
                 data.setdefault("force_sub_groups", {})
+
+                # نظام مراقبة الكلمات (ميزة جديدة) - لا يؤثر على أي إعداد قديم
+                data.setdefault("watch_words", {})
+                data["watch_words"].setdefault("enabled", True)
+                data["watch_words"].setdefault("words", list(WATCH_WORDS_DEFAULT))
+                data["watch_words"].setdefault("target_groups", [])
 
                 return data
         except Exception:
@@ -294,6 +362,49 @@ def extract_forwarded_channel(message):
     return None
 
 
+# === 3.ب أدوات نظام "مراقبة الكلمات" (ميزة جديدة) ===
+# ذاكرة تخزين مؤقت للـ regex المُجمَّع حتى لا نعيد بناءه في كل رسالة (يُعاد بناؤه فقط عند تغيّر القائمة)
+_WATCH_WORDS_CACHE = {"key": None, "pattern": None}
+
+
+def build_watch_words_pattern(words):
+    """
+    يبني تعبيراً نمطياً (regex) واحداً من قائمة الكلمات/العبارات المستهدفة،
+    باستخدام حدود الكلمات (\\b) لتقليل التطابقات الخاطئة (مثل أن تكون الكلمة جزءاً من كلمة أخرى)،
+    مع تجاهل حالة الأحرف (كبيرة/صغيرة) للكلمات اللاتينية.
+    """
+    cleaned = [w.strip() for w in words if w and w.strip()]
+    if not cleaned:
+        return None
+    # الأطول أولاً حتى تُعطى العبارات الأطول أولوية منطقية عند التطابق
+    cleaned.sort(key=len, reverse=True)
+    escaped = [re.escape(w) for w in cleaned]
+    pattern_str = r'(?<!\w)(?:' + '|'.join(escaped) + r')(?!\w)'
+    try:
+        return re.compile(pattern_str, re.IGNORECASE | re.UNICODE)
+    except re.error:
+        logging.exception("فشل بناء نمط مراقبة الكلمات")
+        return None
+
+
+def get_watch_words_pattern(words):
+    """يعيد نسخة مُخزَّنة مؤقتاً من الـ regex، ويعيد بناءه فقط إذا تغيّرت قائمة الكلمات."""
+    key = tuple(words)
+    if _WATCH_WORDS_CACHE.get("key") != key:
+        _WATCH_WORDS_CACHE["pattern"] = build_watch_words_pattern(words)
+        _WATCH_WORDS_CACHE["key"] = key
+    return _WATCH_WORDS_CACHE["pattern"]
+
+
+def is_watch_words_target_group(bot_data, chat_id):
+    """
+    يتحقق مما إذا كانت هذه المجموعة (chat_id) ضمن قائمة المجموعات المستهدفة لنظام مراقبة الكلمات.
+    يستخدم معرّف المجموعة (Chat ID) وليس اسمها، حتى لا يتأثر بتغيّر اسم المجموعة.
+    """
+    targets = bot_data.get("watch_words", {}).get("target_groups", [])
+    return str(chat_id) in [str(t) for t in targets]
+
+
 # === 4. القوائم واللوحات ===
 def get_main_admin_keyboard():
     keyboard = [
@@ -303,6 +414,7 @@ def get_main_admin_keyboard():
         [InlineKeyboardButton("🔇 إدارة الوضع الصامت", callback_data="manage_silent")],
         [InlineKeyboardButton("🆘 نداء الاستغاثة", callback_data="manage_rescue")],
         [InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="manage_force_sub")],
+        [InlineKeyboardButton("🔎 مراقبة الكلمات", callback_data="manage_watch_words")],
         [InlineKeyboardButton("📖 دليل أوامر الإشراف", callback_data="show_cmd_help")],
         [InlineKeyboardButton("👤 إضافة مشرف جديد", callback_data="add_admin")],
         [InlineKeyboardButton("⛔ الكلمات المحظورة", callback_data="manage_words"),
@@ -483,6 +595,50 @@ def build_force_sub_join_keyboard(cfg):
     return InlineKeyboardMarkup(buttons)
 
 
+# ---------- لوحة نظام مراقبة الكلمات (ميزة جديدة) ----------
+def get_watch_words_keyboard(data):
+    w = data.get("watch_words", {})
+    status = "🟢 مفعل" if w.get("enabled", True) else "🔴 معطل"
+    count = len(w.get("words", []))
+    targets_count = len(w.get("target_groups", []))
+    keyboard = [
+        [InlineKeyboardButton(f"الحالة الحالية: {status}", callback_data="watch_words_toggle")],
+        [InlineKeyboardButton(f"🎯 المجموعات المستهدفة: {targets_count}", callback_data="watch_words_targets")],
+        [InlineKeyboardButton(f"📋 عدد الكلمات/العبارات المراقبة: {count}", callback_data="watch_words_list")],
+        [InlineKeyboardButton("➕ إضافة كلمة/عبارة", callback_data="watch_words_add")],
+        [InlineKeyboardButton("🔄 إعادة القائمة الافتراضية", callback_data="watch_words_reset"),
+         InlineKeyboardButton("🗑️ مسح الكل", callback_data="watch_words_clear")],
+        [InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="main_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_watch_words_targets_keyboard(data):
+    """لوحة إدارة المجموعات المستهدفة لنظام مراقبة الكلمات: عرض/إزالة الحالية + إضافة جديدة."""
+    groups = data.get("groups", {})
+    targets = data.get("watch_words", {}).get("target_groups", [])
+    keyboard = []
+    for gid in targets:
+        gname = groups.get(str(gid), f"مجموعة #{gid}")
+        keyboard.append([InlineKeyboardButton(f"🗑️ إزالة: {gname}", callback_data=f"wwtarget_remove_{gid}")])
+    keyboard.append([InlineKeyboardButton("➕ إضافة مجموعة من القائمة المسجلة", callback_data="wwtarget_select_add")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع لمراقبة الكلمات", callback_data="manage_watch_words")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_watch_words_add_target_keyboard(data):
+    """لوحة اختيار مجموعة (من بين المجموعات المسجلة وغير المستهدفة بعد) لإضافتها كمجموعة مستهدفة."""
+    groups = data.get("groups", {})
+    targets = [str(t) for t in data.get("watch_words", {}).get("target_groups", [])]
+    keyboard = []
+    for gid, gname in groups.items():
+        if gid in targets:
+            continue
+        keyboard.append([InlineKeyboardButton(f"👥 {gname}", callback_data=f"wwtarget_add_{gid}")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="watch_words_targets")])
+    return InlineKeyboardMarkup(keyboard)
+
+
 async def send_non_admin_response(update: Update):
     """رسالة تعريفية لغير المشرفين في أول رسالة، ثم رسالة توضح أن الرسائل لا تصل للمطور بعد ذلك."""
     user_id = update.effective_user.id
@@ -590,7 +746,10 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `/الغاء_الحظر` : إزالة الحظر عن المستخدم بالرد عليه.\n"
             "• `/الغاء_الكتم` : السماح للمستخدم بالكتابة مجدداً بالرد عليه.\n\n"
             "🆘 **نداء الاستغاثة:** إذا كتب الأعضاء كلمة النداء المحددة عدداً من المرات المتتالية "
-            "داخل المجموعة المستهدفة، يتم تفعيل الوضع الصامت تلقائياً."
+            "داخل المجموعة المستهدفة، يتم تفعيل الوضع الصامت تلقائياً.\n\n"
+            "🔎 **مراقبة الكلمات:**\n"
+            "• `/تفعيل_مراقبة_الكلمات` : تعيين المجموعة الحالية كمجموعة مستهدفة (لمشرفي البوت فقط).\n"
+            "• `/تعطيل_مراقبة_الكلمات` : إزالة المجموعة الحالية من القائمة المستهدفة (لمشرفي البوت فقط)."
         )
         await query.message.edit_text(help_text, parse_mode='Markdown', reply_markup=get_back_keyboard())
 
@@ -871,6 +1030,88 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ هل أنت متأكد من حذف إعداد الاشتراك الإجباري لهذه المجموعة؟",
             reply_markup=get_force_sub_delete_confirm_keyboard(gid)
         )
+
+    # ---------- نظام مراقبة الكلمات (ميزة جديدة) ----------
+    elif action == "manage_watch_words":
+        await query.message.edit_text(
+            "🔎 **نظام مراقبة الكلمات**\n\n"
+            "يعمل هذا النظام فقط داخل المجموعات المحددة صراحةً كـ«مجموعات مستهدفة» (عبر معرّف المجموعة). "
+            "أي مجموعة غير موجودة في تلك القائمة يتم تجاهل رسائلها كلياً من طرف هذا النظام.\n\n"
+            "عند إرسال أي عضو (غير مشرف) داخل مجموعة مستهدفة لرسالة تحتوي على إحدى الكلمات/العبارات المراقبة، "
+            "يقوم البوت تلقائياً بوسم صاحب الرسالة والإشارة إلى المشرفين الحاليين، دون حذف الرسالة.",
+            parse_mode='Markdown',
+            reply_markup=get_watch_words_keyboard(bot_data)
+        )
+
+    elif action == "watch_words_toggle":
+        bot_data["watch_words"]["enabled"] = not bot_data["watch_words"].get("enabled", True)
+        save_data(bot_data)
+        await query.message.edit_text(
+            "تم تغيير حالة نظام مراقبة الكلمات بنجاح!",
+            reply_markup=get_watch_words_keyboard(bot_data)
+        )
+
+    elif action == "watch_words_list":
+        words_list = bot_data.get("watch_words", {}).get("words", [])
+        if not words_list:
+            listing = "لا توجد كلمات/عبارات مراقبة حالياً."
+        else:
+            listing = "، ".join(words_list)
+        # نرسلها كرسالة منفصلة تفادياً لتجاوز الحد الأقصى لطول نص الأزرار/الرسالة عند التعديل
+        await context.bot.send_message(chat_id=query.message.chat.id, text=f"📋 الكلمات/العبارات المراقبة حالياً:\n\n{listing}")
+
+    elif action == "watch_words_add":
+        WAITING_STATES[user_id] = "add_watch_word"
+        await query.message.edit_text("✏️ **أرسل الكلمة أو العبارة المراد إضافتها لقائمة المراقبة:**", reply_markup=get_back_keyboard("manage_watch_words"))
+
+    elif action == "watch_words_reset":
+        bot_data["watch_words"]["words"] = list(WATCH_WORDS_DEFAULT)
+        save_data(bot_data)
+        await query.message.edit_text("✅ تم إرجاع قائمة الكلمات المراقبة إلى القائمة الافتراضية.", reply_markup=get_watch_words_keyboard(bot_data))
+
+    elif action == "watch_words_clear":
+        bot_data["watch_words"]["words"] = []
+        save_data(bot_data)
+        await query.message.edit_text("✅ تم تفريغ قائمة الكلمات المراقبة بالكامل.", reply_markup=get_watch_words_keyboard(bot_data))
+
+    elif action == "watch_words_targets":
+        if not bot_data.get("watch_words", {}).get("target_groups"):
+            note = "⚠️ لا توجد أي مجموعة مستهدفة حالياً، لذلك النظام لا يعمل في أي مجموعة.\n\n"
+        else:
+            note = ""
+        await query.message.edit_text(
+            "🎯 **المجموعات المستهدفة لنظام مراقبة الكلمات**\n\n"
+            f"{note}"
+            "النظام يعمل فقط داخل المجموعات المُدرَجة هنا. يمكنك الإضافة من القائمة المسجلة، "
+            "أو تفعيله مباشرة من داخل المجموعة نفسها بأمر `/تفعيل_مراقبة_الكلمات` (للمشرفين فقط).",
+            parse_mode='Markdown',
+            reply_markup=get_watch_words_targets_keyboard(bot_data)
+        )
+
+    elif action == "wwtarget_select_add":
+        if not bot_data.get("groups"):
+            await query.message.edit_text("❌ لا توجد مجموعات مسجلة بعد.", reply_markup=get_back_keyboard("watch_words_targets"))
+            return
+        await query.message.edit_text(
+            "🎯 **اختر المجموعة لإضافتها إلى قائمة مراقبة الكلمات:**",
+            parse_mode='Markdown',
+            reply_markup=get_watch_words_add_target_keyboard(bot_data)
+        )
+
+    elif action.startswith("wwtarget_add_"):
+        gid = action.replace("wwtarget_add_", "")
+        targets = bot_data["watch_words"].setdefault("target_groups", [])
+        if gid not in [str(t) for t in targets]:
+            targets.append(gid)
+            save_data(bot_data)
+        await query.message.edit_text("✅ تم إضافة المجموعة إلى قائمة مراقبة الكلمات.", reply_markup=get_watch_words_targets_keyboard(bot_data))
+
+    elif action.startswith("wwtarget_remove_"):
+        gid = action.replace("wwtarget_remove_", "")
+        targets = bot_data["watch_words"].setdefault("target_groups", [])
+        bot_data["watch_words"]["target_groups"] = [t for t in targets if str(t) != str(gid)]
+        save_data(bot_data)
+        await query.message.edit_text("✅ تم إزالة المجموعة من قائمة مراقبة الكلمات.", reply_markup=get_watch_words_targets_keyboard(bot_data))
 
     # ---------- الإذاعات ----------
     elif action == "bc_all":
@@ -1158,6 +1399,22 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         save_data(bot_data)
         await update.message.reply_text("✅ تم تحديث رسالة النداء!", reply_markup=get_back_keyboard("manage_rescue"))
 
+    # ---------- إضافة كلمة/عبارة إلى نظام مراقبة الكلمات (ميزة جديدة) ----------
+    elif state == "add_watch_word":
+        WAITING_STATES[user_id] = None
+        phrase = update.message.text.strip()
+        watch_words_list = bot_data.setdefault("watch_words", {}).setdefault("words", [])
+        if phrase and phrase not in watch_words_list:
+            watch_words_list.append(phrase)
+            save_data(bot_data)
+            await update.message.reply_text(
+                f"✅ تم إضافة الكلمة/العبارة `{escape_markdown(phrase)}` إلى قائمة المراقبة!",
+                parse_mode='Markdown',
+                reply_markup=get_back_keyboard("manage_watch_words")
+            )
+        else:
+            await update.message.reply_text("⚠️ هذه الكلمة/العبارة موجودة بالفعل في القائمة.", reply_markup=get_back_keyboard("manage_watch_words"))
+
     # ---------- استقبال رسالة القناة المُعاد توجيهها (الاشتراك الإجباري) ----------
     elif state.startswith("fs_forward_channel_"):
         gid = state.replace("fs_forward_channel_", "")
@@ -1335,6 +1592,48 @@ async def admin_actions_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text(f"❌ فشل إلغاء الكتم: {e}")
 
 
+async def watch_words_group_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    أوامر داخل المجموعة تسمح لمشرفي البوت (القائمة الموجودة أصلاً في bot_data['admins']) فقط
+    بتعيين/إلغاء تعيين المجموعة الحالية كمجموعة مستهدفة لنظام مراقبة الكلمات، دون الحاجة
+    للدخول إلى لوحة التحكم الخاصة في الرسائل الخاصة. لا علاقة لهذا بصلاحيات "مشرف المجموعة" العادية
+    (creator/administrator في تيليجرام) المستخدمة في أوامر /حظر و/كتم؛ هذا مقصور على مشرفي البوت فقط
+    تماماً كما هو مطلوب.
+    """
+    if not update.message or update.effective_chat.type == 'private':
+        return
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id if update.effective_user else None
+
+    if not user_id or not is_bot_admin(user_id):
+        await update.message.reply_text("❌ هذا الأمر مخصص لمشرفي البوت فقط.")
+        return
+
+    text = update.message.text.strip()
+    cmd = text.split()[0].lower()
+
+    bot_data = load_data()
+    targets = bot_data["watch_words"].setdefault("target_groups", [])
+    chat_id_str = str(chat_id)
+
+    if cmd == "/تفعيل_مراقبة_الكلمات":
+        if chat_id_str not in [str(t) for t in targets]:
+            targets.append(chat_id_str)
+            save_data(bot_data)
+            await update.message.reply_text("✅ تم تفعيل نظام مراقبة الكلمات في هذه المجموعة.")
+        else:
+            await update.message.reply_text("⚠️ نظام مراقبة الكلمات مفعل بالفعل في هذه المجموعة.")
+
+    elif cmd == "/تعطيل_مراقبة_الكلمات":
+        if chat_id_str in [str(t) for t in targets]:
+            bot_data["watch_words"]["target_groups"] = [t for t in targets if str(t) != chat_id_str]
+            save_data(bot_data)
+            await update.message.reply_text("✅ تم تعطيل نظام مراقبة الكلمات في هذه المجموعة.")
+        else:
+            await update.message.reply_text("⚠️ نظام مراقبة الكلمات غير مفعل أصلاً في هذه المجموعة.")
+
+
 # === 9. فلتر المجموعات ===
 def is_silent_active(bot_data, chat_id):
     """يتحقق مما إذا كان الوضع الصامت مفعلاً، ويطبَّق فقط على المجموعة المستهدفة المحددة."""
@@ -1449,6 +1748,58 @@ async def handle_rescue_keyword(update, context, chat_id, bot_data, text):
     return True
 
 
+async def handle_watch_words_alert(update, context, chat_id, bot_data, text, user_id, first_name):
+    """
+    نظام مراقبة الكلمات (ميزة جديدة):
+    عند اكتشاف أي كلمة/عبارة من قائمة المراقبة داخل رسالة عضو (غير مشرف)، يقوم البوت تلقائياً
+    بوسم صاحب الرسالة والإشارة إلى المشرفين الحاليين الموجودين في بيانات البوت (bot_data["admins"])،
+    دون حذف الرسالة أو التأثير على أي فلتر آخر.
+    """
+    watch_cfg = bot_data.get("watch_words", {})
+    if not watch_cfg.get("enabled", True):
+        return False
+
+    # النظام لا يعمل إلا داخل المجموعات المحددة صراحة كمجموعات مستهدفة (بالمعرّف/Chat ID)
+    if not is_watch_words_target_group(bot_data, chat_id):
+        return False
+
+    words_list = watch_cfg.get("words", [])
+    if not words_list:
+        return False
+
+    pattern = get_watch_words_pattern(words_list)
+    if not pattern:
+        return False
+
+    if not pattern.search(text):
+        return False
+
+    admins = bot_data.get("admins", [])
+    admin_mentions = []
+    for admin_id in admins:
+        admin_mentions.append(f"[مشرف](tg://user?id={admin_id})")
+    admins_text = " ".join(admin_mentions) if admin_mentions else "لا يوجد مشرفون مسجّلون حالياً"
+
+    safe_name = escape_markdown(first_name or "عضو")
+    user_tag = f"[{safe_name}](tg://user?id={user_id})"
+
+    alert_text = (
+        "🔎 **تنبيه مراقبة الكلمات**\n"
+        f"تم رصد ذكر كلمة/عبارة مراقبة من طرف: {user_tag}\n\n"
+        f"👮 المشرفون: {admins_text}"
+    )
+
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=alert_text, parse_mode='Markdown')
+    except Exception:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=f"🔎 تنبيه مراقبة الكلمات: {first_name}")
+        except Exception:
+            logging.exception("فشل إرسال تنبيه مراقبة الكلمات")
+
+    return True
+
+
 async def delete_after_delay(message, delay_seconds):
     """يحذف رسالة معينة بعد مهلة زمنية محددة، مستخدَمة لرسالة الاشتراك الإجباري (25 ثانية)."""
     try:
@@ -1537,7 +1888,7 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             return
 
-    # المشرفون معفيون من فلاتر المحتوى (كلمات/إيموجي/روابط/ملصقات/نداء الاستغاثة/الاشتراك الإجباري)
+    # المشرفون معفيون من فلاتر المحتوى (كلمات/إيموجي/روابط/ملصقات/نداء الاستغاثة/الاشتراك الإجباري/مراقبة الكلمات)
     if user_is_admin:
         return
 
@@ -1563,10 +1914,17 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delete_and_warn(msg, context, chat_id, first_name, "صورة متحركة GIF")
         return
 
-    # فحص الكلمات والإيموجي والروابط الممنوعة + نداء الاستغاثة
+    # فحص الكلمات والإيموجي والروابط الممنوعة + نداء الاستغاثة + مراقبة الكلمات
     text = msg.text or msg.caption
     if not text:
         return
+
+    # نظام مراقبة الكلمات (ميزة جديدة) - مستقل تماماً، لا يحذف الرسالة ولا يوقف باقي الفحوصات
+    if user_id:
+        try:
+            await handle_watch_words_alert(update, context, chat_id, bot_data, text, user_id, first_name)
+        except Exception:
+            logging.exception("خطأ غير متوقع أثناء تنفيذ نظام مراقبة الكلمات")
 
     # نداء الاستغاثة (يُفحص بشكل مستقل عن باقي المخالفات)
     handled = await handle_rescue_keyword(update, context, chat_id, bot_data, text)
@@ -1646,6 +2004,8 @@ async def main():
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND), handle_private_message))
 
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.Regex(r"^/(حظر|كتم|الغاء_الحظر|الغاء_الكتم|ban|mute|unban|unmute)"), admin_actions_handler))
+
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.Regex(r"^/(تفعيل_مراقبة_الكلمات|تعطيل_مراقبة_الكلمات)"), watch_words_group_command_handler))
 
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, group_filter))
 
