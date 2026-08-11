@@ -858,6 +858,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `/حظر` : حظر المستخدم نهائياً.\n"
             "• `/حظر 10m` أو `/حظر 2h` : حظر مؤقت.\n"
             "• `/كتم` أو `/كتم 30m` : كتم المستخدم.\n"
+            "• `/كتم_لوحة` (بالرد على رسالة المستخدم) : فتح قائمة مدد الكتم الجاهزة بالأزرار.\n"
             "• `/الغاء_الحظر` : إزالة الحظر عن المستخدم بالرد عليه.\n"
             "• `/الغاء_الكتم` : السماح للمستخدم بالكتابة مجدداً بالرد عليه.\n\n"
             "🆘 **نداء الاستغاثة:** إذا كتب الأعضاء كلمة النداء المحددة عدداً من المرات المتتالية "
@@ -1403,7 +1404,9 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(
             "🔇 **كتم مستخدم**\n\n"
             "قم بإعادة توجيه (Forward) رسالة المستخدم المخالف إلى هذا البوت هنا، "
-            "وسأقوم بتحديد هويته ثم أطلب منك اختيار المجموعة ومدة الكتم.",
+            "وسأقوم بتحديد هويته ثم أطلب منك اختيار المجموعة ومدة الكتم.\n\n"
+            "⚠️ ملاحظة: إذا كان هذا المستخدم قد فعّل خصوصية «إخفاء هوية التوجيه»، فلن يعمل التوجيه. "
+            "في هذه الحالة اذهب للمجموعة، اضغط رد على رسالته، واكتب `/كتم_لوحة` مباشرة.",
             parse_mode='Markdown',
             reply_markup=get_back_keyboard("main_menu")
         )
@@ -1836,16 +1839,37 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         legacy_user = getattr(update.message, "forward_from", None)
 
         target_user = None
+        is_hidden_by_privacy = False
         if legacy_user is not None:
             target_user = legacy_user
-        elif origin is not None and getattr(origin, "type", None) == "user":
-            target_user = getattr(origin, "sender_user", None)
+        elif origin is not None:
+            origin_type = getattr(origin, "type", None)
+            if origin_type == "user":
+                target_user = getattr(origin, "sender_user", None)
+            elif origin_type == "hidden_user":
+                is_hidden_by_privacy = True
+
+        if is_hidden_by_privacy:
+            await update.message.reply_text(
+                "❌ لا يمكن تحديد هوية هذا المستخدم عبر التوجيه.\n\n"
+                "السبب: هذا الحساب فعّل إعداد خصوصية «الرسائل المُعاد توجيهها» في تيليجرام، "
+                "مما يمنع تيليجرام نفسه من إعطاء أي بوت معرّف هذا المستخدم عند إعادة التوجيه "
+                "(هذا قيد من تيليجرام وليس خللاً في البوت).\n\n"
+                "✅ **الحل:** اذهب داخل المجموعة نفسها، اضغط رد (Reply) على رسالة هذا المستخدم المخالف، "
+                "واكتب الأمر:\n`/كتم_لوحة`\n\n"
+                "ستظهر لك قائمة مدد الكتم مباشرة، وهذه الطريقة تعمل دائماً بغض النظر عن إعدادات الخصوصية.",
+                parse_mode='Markdown',
+                reply_markup=get_back_keyboard("main_menu")
+            )
+            return
 
         if not target_user:
             await update.message.reply_text(
                 "❌ لم أتمكن من تحديد صاحب هذه الرسالة.\n\n"
                 "تأكد من أنها إعادة توجيه (Forward) حقيقية لرسالة المستخدم المخالف من داخل المجموعة "
-                "(وليست رسالة من قناة أو مستخدم مخفي الهوية).",
+                "(وليست رسالة من قناة).\n\n"
+                "💡 بديل يعمل دائماً: اذهب داخل المجموعة، اضغط رد (Reply) على رسالة المستخدم، واكتب `/كتم_لوحة`.",
+                parse_mode='Markdown',
                 reply_markup=get_back_keyboard("main_menu")
             )
             return
@@ -1902,6 +1926,28 @@ async def admin_actions_handler(update: Update, context: ContextTypes.DEFAULT_TY
         target_user_id = update.message.reply_to_message.from_user.id
         target_user_name = update.message.reply_to_message.from_user.first_name
 
+    if cmd in ["/كتم_لوحة", "/mutepanel"]:
+        # طريقة بديلة لفتح قائمة مدد الكتم عبر الرد مباشرة داخل المجموعة (بدون Forward)،
+        # وهذا يتجاوز مشكلة إخفاء هوية المُرسِل التي تفرضها إعدادات الخصوصية في تيليجرام على التوجيه.
+        if not is_bot_admin(user_id):
+            await update.message.reply_text("❌ هذا الأمر مخصص لمشرفي البوت فقط.")
+            return
+        if not target_user_id:
+            await update.message.reply_text("❌ يرجى الرد على رسالة المستخدم المخالف باستخدام هذا الأمر.")
+            return
+        TEMP_MUTE[user_id] = {
+            "target_user_id": target_user_id,
+            "target_user_name": target_user_name,
+            "chat_id": str(chat_id)
+        }
+        bot_data = load_data()
+        await update.message.reply_text(
+            f"⏱ **اختر مدة كتم {target_user_name}:**",
+            parse_mode='Markdown',
+            reply_markup=get_mute_durations_keyboard(bot_data)
+        )
+        return
+
     if cmd in ["/حظر", "/ban"]:
         if not target_user_id:
             await update.message.reply_text("❌ يرجى الرد على رسالة المستخدم للقيام بالحظر.")
@@ -1911,8 +1957,15 @@ async def admin_actions_handler(update: Update, context: ContextTypes.DEFAULT_TY
         if len(context.args) > 0 and not context.args[0].startswith("@"):
             try:
                 duration = parse_time(context.args[0])
+                if duration is None:
+                    raise ValueError
             except Exception:
-                pass
+                await update.message.reply_text(
+                    f"❌ صيغة المدة `{context.args[0]}` غير صحيحة. استخدم مثل: `10m` أو `2h` أو `3d`، "
+                    "أو اترك الأمر بدون مدة للحظر النهائي.",
+                    parse_mode='Markdown'
+                )
+                return
 
         try:
             until_date = datetime.now() + duration if duration else None
@@ -1931,8 +1984,15 @@ async def admin_actions_handler(update: Update, context: ContextTypes.DEFAULT_TY
         if len(context.args) > 0 and not context.args[0].startswith("@"):
             try:
                 duration = parse_time(context.args[0])
+                if duration is None:
+                    raise ValueError
             except Exception:
-                pass
+                await update.message.reply_text(
+                    f"❌ صيغة المدة `{context.args[0]}` غير صحيحة. استخدم مثل: `10m` أو `2h` أو `3d`، "
+                    "أو اترك الأمر بدون مدة للكتم النهائي.",
+                    parse_mode='Markdown'
+                )
+                return
 
         try:
             until_date = datetime.now() + duration if duration else None
@@ -2318,7 +2378,7 @@ async def main():
     app.add_handler(CallbackQueryHandler(button_click))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND), handle_private_message))
 
-    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.Regex(r"^/(حظر|كتم|الغاء_الحظر|الغاء_الكتم|ban|mute|unban|unmute)"), admin_actions_handler))
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.Regex(r"^/(حظر|كتم|كتم_لوحة|الغاء_الحظر|الغاء_الكتم|ban|mute|mutepanel|unban|unmute)"), admin_actions_handler))
 
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, group_filter))
 
