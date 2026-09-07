@@ -391,6 +391,7 @@ def detect_watched_word(text, watched_words):
 
 
 def build_user_mention_html(user):
+    """ينشئ Mention حقيقي وقابل للنقر لصاحب رسالة باستخدام tg://user?id=، يعمل حتى بدون معرّف عام (@username)."""
     name = html.escape(user.first_name or "عضو")
     return f'<a href="tg://user?id={user.id}">{name}</a>'
 
@@ -830,7 +831,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         silent = bot_data["silent_mode"]
         silent["enabled"] = not silent.get("enabled")
         if silent["enabled"]:
-            # إذا تم التفعيل، نضبط الوقت الحالي كنقطة بداية
             silent["until_timestamp"] = datetime.now().timestamp()
         save_data(bot_data)
         await safe_edit_text(
@@ -1994,9 +1994,9 @@ async def handle_forwarded_channel(update: Update, context: ContextTypes.DEFAULT
     )
 
 
-# === نظام الاشتراك الإجباري (مع إضافة Mention) ===
+# === نظام الاشتراك الإجباري (مع إضافة Mention حقيقي) ===
 async def handle_force_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """التحقق من الاشتراك الإجباري وإرسال رسالة مع Mention للمستخدم غير المشترك"""
+    """التحقق من الاشتراك الإجباري وإرسال رسالة مع Mention حقيقي للمستخدم غير المشترك"""
     chat_id = update.effective_chat.id
     user = update.effective_user
     message = update.effective_message
@@ -2026,47 +2026,54 @@ async def handle_force_subscription(update: Update, context: ContextTypes.DEFAUL
         # إذا حدث خطأ (مثل عدم وجود البوت في القناة)، نسمح بالكتابة لتجنب التعطيل
         return
     
-    # المستخدم غير مشترك → نمنعه من الكتابة ونرسل له رسالة مع Mention
+    # المستخدم غير مشترك → نمنعه من الكتابة ونرسل له رسالة مع Mention حقيقي
     try:
         # حذف الرسالة المخالفة
         await message.delete()
     except Exception:
         pass
     
-    # بناء رسالة مع Mention للمستخدم
-    mention = build_user_mention_html(user)
+    # بناء Mention حقيقي للمستخدم باستخدام HTML
+    user_mention = build_user_mention_html(user)
+    
+    # الحصول على معلومات القناة
     channel_title = config.get("channel_title", "القناة")
     invite_link = config.get("invite_link", "")
     
+    # بناء الرسالة بصيغة HTML مع Mention حقيقي
     if invite_link:
         sub_text = (
-            f"{mention}، **يجب عليك الاشتراك في القناة أولاً** قبل المشاركة في هذه المجموعة.\n\n"
-            f"📢 **القناة المطلوبة:** {channel_title}\n"
-            f"🔗 **رابط الاشتراك:** {invite_link}\n\n"
+            f"{user_mention}، <b>يجب عليك الاشتراك في القناة أولاً</b> قبل المشاركة في هذه المجموعة.\n\n"
+            f"📢 <b>القناة المطلوبة:</b> {html.escape(channel_title)}\n"
+            f"🔗 <b>رابط الاشتراك:</b> {invite_link}\n\n"
             "✉️ بعد الاشتراك، أعد المحاولة."
         )
     else:
         sub_text = (
-            f"{mention}، **يجب عليك الاشتراك في القناة أولاً** قبل المشاركة في هذه المجموعة.\n\n"
-            f"📢 **القناة المطلوبة:** {channel_title}\n\n"
+            f"{user_mention}، <b>يجب عليك الاشتراك في القناة أولاً</b> قبل المشاركة في هذه المجموعة.\n\n"
+            f"📢 <b>القناة المطلوبة:</b> {html.escape(channel_title)}\n\n"
             "✉️ بعد الاشتراك، أعد المحاولة."
         )
     
+    # إرسال الرسالة مع Mention حقيقي
     try:
         await context.bot.send_message(
             chat_id,
             sub_text,
             parse_mode='HTML'
         )
-    except Exception:
-        # إذا فشل HTML، نرسل نص عادي
+    except Exception as e:
+        # إذا فشل HTML، نحاول إرسالها كنص عادي
+        logging.error(f"فشل إرسال رسالة الاشتراك الإجباري بصيغة HTML: {e}")
         try:
+            # محاولة إرسالها بدون HTML
+            fallback_text = f"@{user.username or user.first_name}، يجب عليك الاشتراك في القناة أولاً قبل المشاركة."
             await context.bot.send_message(
                 chat_id,
-                f"@{user.username or user.first_name}، يجب عليك الاشتراك في القناة أولاً قبل المشاركة."
+                fallback_text
             )
-        except Exception:
-            pass
+        except Exception as e2:
+            logging.error(f"فشل إرسال رسالة الاشتراك الإجباري كنص عادي: {e2}")
 
 
 # === نظام مراقبة الكلمات ===
@@ -2108,11 +2115,11 @@ async def handle_word_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if alert_admins:
         mention = build_user_mention_html(user)
         alert_text = (
-            f"🔔 **تنبيه: تم رصد كلمة مراقبة**\n\n"
-            f"👤 **المستخدم:** {mention}\n"
-            f"🔎 **الكلمة المكتشفة:** `{detected_word}`\n"
-            f"📝 **النص:** {html.escape(text[:100])}\n\n"
-            f"🆔 **المجموعة:** {update.effective_chat.title}"
+            f"🔔 <b>تنبيه: تم رصد كلمة مراقبة</b>\n\n"
+            f"👤 <b>المستخدم:</b> {mention}\n"
+            f"🔎 <b>الكلمة المكتشفة:</b> <code>{html.escape(detected_word)}</code>\n"
+            f"📝 <b>النص:</b> {html.escape(text[:100])}\n\n"
+            f"🆔 <b>المجموعة:</b> {html.escape(update.effective_chat.title)}"
         )
         
         for admin_username in alert_admins:
