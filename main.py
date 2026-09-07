@@ -1874,15 +1874,20 @@ async def check_force_subscription(update, context, chat_id, bot_data, user_id, 
     user = update.effective_user
     display_name = (user.first_name or user.full_name or "العضو") if user else "العضو"
     safe_channel_name = str(channel_name)
+    # نضع الرمز @ فعلياً داخل النص، ثم نجعل كامل @ + الاسم TEXT_MENTION
+    # مرتبطاً بـ user.id. بهذه الطريقة سيظهر للمستخدم كـ @اسم، ويكون قابلاً
+    # للضغط ويشير إلى الحساب المحدد نفسه، حتى لو لم يكن لديه Username عام.
+    mention_text = f"@{display_name}"
     text = (
-        f"🔒 عذراً يا {display_name}،\n"
+        f"🔒 عذراً يا {mention_text}،\n"
         f"يرجى الاشتراك أولاً في قناة «{safe_channel_name}» حتى تتمكن من المشاركة وإرسال الرسائل داخل هذه المجموعة."
     )
 
     # Telegram يحسب offset/length بوحدات UTF-16، لذلك نحسبها بدقة بدلاً من
     # الاعتماد على len() وحدها، خصوصاً مع العربية والإيموجي.
-    mention_start = len((f"🔒 عذراً يا ").encode("utf-16-le")) // 2
-    mention_length = len(display_name.encode("utf-16-le")) // 2
+    mention_prefix = "🔒 عذراً يا "
+    mention_start = len(mention_prefix.encode("utf-16-le")) // 2
+    mention_length = len(mention_text.encode("utf-16-le")) // 2
     entities = [
         MessageEntity(
             type=MessageEntity.TEXT_MENTION,
