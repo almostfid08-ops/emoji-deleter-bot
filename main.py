@@ -1,28 +1,29 @@
-
-
-
-
 import os
 import logging
 import asyncio
 import json
 import re
-import html
-from datetime import datetime, timedelta
+import html as html_lib
+from datetime import datetime, timedelta, timezone
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
+from telegram.error import RetryAfter, Forbidden, BadRequest
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
     MessageHandler,
     CommandHandler,
     CallbackQueryHandler,
+    ChatMemberHandler,
     filters
 )
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 INITIAL_ADMINS = [1611988598, 7065061464]
 DATA_FILE = "bot_data.json"
+
+# توقيت الجزائر (UTC+1 بدون توقيت صيفي) يُستخدم في الإشعارات فقط
+LOCAL_TZ = timezone(timedelta(hours=1))
 
 # حالات الانتظار الخاصة بلوحة تحكم المشرفين
 WAITING_STATES = {}
@@ -36,55 +37,54 @@ RESCUE_TRACK = {}
 # {user_id: int}
 PRIVATE_MSG_TRACK = {}
 
-# تتبّع وقتي (غير محفوظ) لعملية كتم مستخدم قيد الإعداد من طرف أدمن معيّن
-# {admin_id: {"target_user_id":, "target_user_name":, "chat_id":}}
-TEMP_MUTE = {}
+# تتبّع وقتي (غير محفوظ) لمخالفات الأعضاء داخل كل مجموعة (نظام الكتم التلقائي)
+# {(chat_id, user_id): {"count": int, "ts": float}}
+STRIKE_TRACK = {}
 
-# القائمة الافتراضية لكلمات/عبارات نظام "مراقبة الكلمات" (يمكن للأدمن إضافة/حذف كلمات لاحقاً)
-DEFAULT_WATCH_WORDS = [
-    "جروب", "قروب", "ڨروب", "غروب", "group", "Groupe", "گروب",
-    "الجروب", "القروب", "مجموعة", "المجموعة", "جروبنا", "قروبنا",
-    "المجموعة تاعنا", "الجروب تاعنا", "groupe ta3na", "group ta3na",
-    "groupe privé", "groupe du bac", "rejoindre le groupe"
-]
-
-# المدد الافتراضية الجاهزة لنظام الكتم (بالثواني) — لا يمكن حذفها من لوحة الإدارة
-DEFAULT_MUTE_DURATIONS = [
-    ("15 دقيقة", 15 * 60),
-    ("20 دقيقة", 20 * 60),
-    ("30 دقيقة", 30 * 60),
-    ("60 دقيقة", 60 * 60),
-    ("ساعة ونصف", 90 * 60),
-    ("ساعتان", 120 * 60),
-    ("ساعتان ونصف", 150 * 60),
-    ("3 ساعات", 180 * 60),
-    ("3 ساعات ونصف", 210 * 60),
-    ("4 ساعات ونصف", 270 * 60),
-    ("يوم", 24 * 60 * 60),
-    ("يومان", 2 * 24 * 60 * 60),
-    ("3 أيام", 3 * 24 * 60 * 60),
-    ("4 أيام", 4 * 24 * 60 * 60),
-]
+# تتبّع وقتي (غير محفوظ) لآخر رسالة اشتراك إجباري أُرسلت لكل عضو (لمنع تكرار الإزعاج)
+# {(chat_id, user_id): timestamp}
+FS_WARN_TRACK = {}
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
+# الإعدادات الافتراضية للميزات الجديدة (تُدمج تلقائياً مع أي بيانات قديمة دون التأثير عليها)
+DEFAULT_SETTINGS = {
+    "notify_join_leave": True,    # إشعار المطور عند إضافة/إخراج البوت من أي مجموعة
+    "group_welcome": True,        # رسالة ترحيب وتعليمات داخل المجموعة عند إضافة البوت
+    "clean_service": False,       # حذف رسائل انضمام/مغادرة الأعضاء
+    "strikes_enabled": False,     # نظام المخالفات والكتم التلقائي
+    "strikes_limit": 3,           # عدد المخالفات قبل الكتم
+    "strikes_minutes": 10         # مدة الكتم التلقائي بالدقائق
+}
+
 # === نصوص ثابتة ===
 DEVELOPER_USERNAME = "@Nabil1r"
 
 NON_ADMIN_INFO_TEXT = (
-    "🤖 **مرحباً بك!**\n\n"
-    "هذا البوت مُصمَّم ليعمل كـ**مشرف داخل مجموعات الدراسة**، ومهامه:\n\n"
-    "• 🚫 حذف الإيموجيات غير المرغوب بها.\n"
-    "• 🚫 حذف الكلمات والروابط الممنوعة.\n"
-    "• 🚫 حذف الملصقات (الستيكرز) والصور المتحركة GIF الممنوعة.\n"
-    "• 🔇 تفعيل وضع صامت في أوقات محددة، أو تلقائياً عند نداء استغاثة من الأعضاء.\n"
-    "• 📢 فرض الاشتراك الإجباري في قناة محددة قبل السماح بالكتابة.\n"
-    "• 🛡️ الحفاظ على الجو الدراسي الهادئ داخل المجموعة بشكل عام.\n\n"
+    "🤖 **أهلاً بك في بوت مراقبة المجموعات الدراسية!**\n\n"
+    "بوت حماية وإدارة احترافي، مُصمَّم ليكون **المشرف الذكي داخل مجموعات الدراسة**؛ "
+    "يحافظ على جو المذاكرة الهادئ ويتصدى لكل ما يشتّت الأعضاء أو يسيء للمجموعة، ويعمل على مدار الساعة.\n\n"
+    "🛡️ **الحماية التلقائية:**\n"
+    "• حذف الإيموجيات غير المرغوب بها.\n"
+    "• حذف الكلمات الممنوعة.\n"
+    "• حظر الروابط (جميعها أو نطاقات محددة).\n"
+    "• حذف الملصقات (الستيكرز) والصور المتحركة GIF.\n"
+    "• نظام مخالفات يكتم المكرِّر تلقائياً لمدة محددة.\n"
+    "• تنظيف رسائل انضمام ومغادرة الأعضاء.\n\n"
+    "🔇 **الوضع الصامت:** تفعيل لمدة مؤقتة جاهزة، أو بجدول يومي (من/إلى) مع رسالة توضيحية للأعضاء.\n\n"
+    "🆘 **نداء الاستغاثة:** عند تكرار الأعضاء لكلمة النداء يُفعَّل الوضع الصامت تلقائياً "
+    "حتى يصل المشرفون، ويمكن للمشرف إلغاؤه بضغطة زر.\n\n"
+    "📢 **الاشتراك الإجباري:** لكل مجموعة قناتها المستقلة؛ يُحذف كلام غير المشترك ويُوجَّه له تنبيه "
+    "**بمنشن باسمه** يعلمه أن الرسالة موجهة له، مع زر انضمام وزر تحقق فوري.\n\n"
+    "⚖️ **أوامر الإشراف السريعة (بالرد على الرسالة):** حظر، كتم، إلغاء الحظر، إلغاء الكتم — دائماً أو لمدة محددة.\n\n"
+    "📣 **الإذاعة:** إرسال إعلان واحد لكل المجموعات دفعة واحدة، أو لمجموعة محددة، أو لمستخدمي البوت، مع أزرار روابط ملونة.\n\n"
+    "🔔 **تنبيه المطور:** يصل المطور إشعار فوري عند إضافة البوت إلى أي مجموعة أو إخراجه منها، "
+    "ويتضمن حساب الشخص والمجموعة والرابط والوقت.\n\n"
     f"للحصول على هذه الميزات داخل مجموعتك، يرجى التواصل مع مطور البوت {DEVELOPER_USERNAME} "
-    "كي يقوم بإضافتك كمشرف للبوت والسماح لك باستخدام ميزاته."
+    "كي يقوم بتفعيل البوت لك وإضافتك كمشرف."
 )
 
 NON_ADMIN_SPAM_TEXT = (
@@ -128,23 +128,12 @@ def default_data():
         # المفتاح = group_id (str) → { channel_id, channel_title, channel_username, invite_link,
         #                              enabled, created_at, updated_at }
         "force_sub_groups": {},
-
-        # نظام مراقبة الكلمات والعبارات (ميزة جديدة)
-        "word_watch": {
-            # group_id (str) → True/False (مفعّل أم لا)
-            "target_groups": {},
-            # قائمة الكلمات/العبارات المراقبة
-            "words": list(DEFAULT_WATCH_WORDS),
-            # group_id (str) → قائمة أسماء المستخدمين (@username) الذين يجب تنبيههم
-            "alert_admins": {}
-        },
-
-        # نظام كتم المستخدمين (ميزة جديدة)
-        # مدد مخصصة يضيفها الأدمن: [{"label": str, "seconds": int}]
-        "custom_mute_durations": [],
-        # كتمات مجدولة (لضمان عدم ضياعها عند إعادة تشغيل البوت):
-        # [{"chat_id":, "user_id":, "user_name":, "until_ts":}]
-        "active_mutes": []
+        # تفاصيل المجموعات (من أضاف البوت ومتى + الرابط): المفتاح = group_id (str)
+        "groups_info": {},
+        # سجل المجموعات التي أُخرج منها البوت (آخر 50)
+        "removed_groups": {},
+        # إعدادات الميزات الجديدة
+        "settings": dict(DEFAULT_SETTINGS)
     }
 
 
@@ -189,18 +178,15 @@ def load_data():
                     "⚠️ نداء الاستغاثة يدل على وجود مخالفة أو نزاع داخل المجموعة، الرجاء الانتظار حتى وصول المشرفين."
                 )
 
-                # الاشتراك الإجباري (ميزة جديدة) - لا يؤثر على أي إعداد قديم
+                # الاشتراك الإجباري - لا يؤثر على أي إعداد قديم
                 data.setdefault("force_sub_groups", {})
 
-                # مراقبة الكلمات (ميزة جديدة) - لا يؤثر على أي إعداد قديم
-                data.setdefault("word_watch", {})
-                data["word_watch"].setdefault("target_groups", {})
-                data["word_watch"].setdefault("words", list(DEFAULT_WATCH_WORDS))
-                data["word_watch"].setdefault("alert_admins", {})
-
-                # نظام الكتم (ميزة جديدة) - لا يؤثر على أي إعداد قديم
-                data.setdefault("custom_mute_durations", [])
-                data.setdefault("active_mutes", [])
+                # الميزات الجديدة (تتبع المجموعات + الإعدادات)
+                data.setdefault("groups_info", {})
+                data.setdefault("removed_groups", {})
+                data.setdefault("settings", {})
+                for key, value in DEFAULT_SETTINGS.items():
+                    data["settings"].setdefault(key, value)
 
                 return data
         except Exception:
@@ -312,6 +298,36 @@ def escape_markdown(text):
     return re.sub(r'([_*`\[\]])', r'\\\1', str(text))
 
 
+def h(text):
+    """تهريب نص ليُستخدم داخل رسائل HTML بأمان."""
+    return html_lib.escape(str(text if text is not None else ""))
+
+
+def local_now_str():
+    return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M") + " (توقيت الجزائر)"
+
+
+def user_mention_html(user_id, name):
+    """منشن (تاغ) لعضو عبر معرّفه، يصله بإشعار حتى لو لم يكن لديه يوزر."""
+    return f'<a href="tg://user?id={user_id}">{h(name)}</a>'
+
+
+def user_details_html(user):
+    """تفاصيل كاملة عن مستخدم (للإشعارات): الاسم بمنشن + اليوزر + المعرّف."""
+    username = f"@{h(user.username)}" if getattr(user, "username", None) else "لا يوجد"
+    return (
+        f"   • الاسم: {user_mention_html(user.id, user.full_name)}\n"
+        f"   • اليوزر: {username}\n"
+        f"   • المعرّف: <code>{user.id}</code>"
+    )
+
+
+def user_contact_url(user):
+    if getattr(user, "username", None):
+        return f"https://t.me/{user.username}"
+    return f"tg://user?id={user.id}"
+
+
 async def safe_edit_text(message, text, reply_markup=None, parse_mode='Markdown'):
     """يحاول تعديل الرسالة بصيغة Markdown، وإذا فشل (لأي سبب) يعيد المحاولة كنص عادي بدل الفشل الصامت."""
     try:
@@ -355,112 +371,13 @@ def extract_forwarded_channel(message):
     return None
 
 
-# === 3.1 أدوات نظام مراقبة الكلمات ===
-_WORD_PATTERN_CACHE = {}
-
-
-def _compile_watch_pattern(word):
-    """
-    يبني نمط Regex للكلمة/العبارة يعتمد على حدود كلمات حقيقية (word boundaries)
-    لتفادي التطابقات الخاطئة (مثل اكتشاف 'group' داخل كلمة أخرى غير مرتبطة)،
-    مع مراعاة عدم حساسية الأحرف الكبيرة/الصغيرة بالنسبة للفرنسية/الإنجليزية.
-    """
-    cached = _WORD_PATTERN_CACHE.get(word)
-    if cached is not None:
-        return cached
-    escaped = re.escape(word.strip())
-    try:
-        pattern = re.compile(r'(?<!\w)' + escaped + r'(?!\w)', re.IGNORECASE | re.UNICODE)
-    except re.error:
-        pattern = None
-    _WORD_PATTERN_CACHE[word] = pattern
-    return pattern
-
-
-def detect_watched_word(text, watched_words):
-    """
-    يفحص النص بحثاً عن أول كلمة/عبارة مستهدفة موجودة فيه (سواء وحدها، داخل جملة،
-    في البداية/الوسط/النهاية، أو بجانب علامات الترقيم). يعيد الكلمة المكتشفة أو None.
-    """
-    if not text:
-        return None
-    for word in watched_words:
-        if not word or not word.strip():
-            continue
-        pattern = _compile_watch_pattern(word)
-        if pattern and pattern.search(text):
-            return word
-    return None
-
-
-def build_user_mention_html(user):
-    """ينشئ Mention حقيقي وقابل للنقر لصاحب رسالة باستخدام tg://user?id=، يعمل حتى بدون معرّف عام (@username)."""
-    name = html.escape(user.first_name or "عضو")
-    return f'<a href="tg://user?id={user.id}">{name}</a>'
-
-
-# === 3.2 أدوات نظام كتم المستخدمين ===
-def get_all_mute_durations(bot_data):
-    """يجمع المدد الجاهزة الافتراضية مع المدد المخصصة التي أضافها الأدمن."""
-    durations = list(DEFAULT_MUTE_DURATIONS)
-    for item in bot_data.get("custom_mute_durations", []):
-        durations.append((item.get("label"), item.get("seconds")))
-    return durations
-
-
-def format_mute_duration_label(seconds):
-    """يحوّل عدد الثواني إلى نص عربي مقروء لعرضه في رسالة الكتم التلقائية."""
-    if seconds % (24 * 60 * 60) == 0 and seconds >= 24 * 60 * 60:
-        days = seconds // (24 * 60 * 60)
-        return f"{days} يوم" if days == 1 else f"{days} أيام"
-    if seconds % 3600 == 0:
-        hours = seconds // 3600
-        return f"{hours} ساعة" if hours == 1 else f"{hours} ساعات"
-    minutes = max(1, seconds // 60)
-    return f"{minutes} دقيقة"
-
-
-def register_active_mute(bot_data, chat_id, user_id, user_name, until_ts):
-    """يحفظ سجل الكتم في قاعدة البيانات حتى لا يضيع النظام عند إعادة تشغيل البوت."""
-    active = bot_data.setdefault("active_mutes", [])
-    active[:] = [m for m in active if not (str(m.get("chat_id")) == str(chat_id) and str(m.get("user_id")) == str(user_id))]
-    active.append({
-        "chat_id": chat_id,
-        "user_id": user_id,
-        "user_name": user_name,
-        "until_ts": until_ts
-    })
-    save_data(bot_data)
-
-
-async def mute_watcher_loop(app):
-    """
-    حلقة خلفية دائمة تتحقق دورياً من الكتمات المجدولة المحفوظة، وترفع الكتم فعلياً
-    عن أي مستخدم انتهت مدته (حتى إن أعيد تشغيل البوت أثناء فترة الكتم، فالبيانات محفوظة في الملف).
-    """
-    while True:
-        try:
-            bot_data = load_data()
-            active = bot_data.get("active_mutes", [])
-            now_ts = datetime.now().timestamp()
-            remaining = []
-            changed = False
-            for m in active:
-                if m.get("until_ts", 0) <= now_ts:
-                    changed = True
-                    try:
-                        permissions = ChatPermissions(can_send_messages=True, can_send_other_messages=True)
-                        await app.bot.restrict_chat_member(int(m["chat_id"]), int(m["user_id"]), permissions=permissions)
-                    except Exception:
-                        logging.exception("فشل رفع الكتم التلقائي عن مستخدم")
-                else:
-                    remaining.append(m)
-            if changed:
-                bot_data["active_mutes"] = remaining
-                save_data(bot_data)
-        except Exception:
-            logging.exception("خطأ في حلقة مراقبة الكتمات")
-        await asyncio.sleep(30)
+def member_is_subscribed(member):
+    """يحدد هل العضو مشترك فعلاً في القناة (يعالج حالة restricted التي قد يكون صاحبها غادر)."""
+    if member.status in ['left', 'kicked']:
+        return False
+    if member.status == 'restricted' and getattr(member, "is_member", True) is False:
+        return False
+    return True
 
 
 # === 4. القوائم واللوحات ===
@@ -469,11 +386,11 @@ def get_main_admin_keyboard():
         [InlineKeyboardButton("📢 إذاعة عامة للمجموعات", callback_data="bc_all"),
          InlineKeyboardButton("🎯 إذاعة مخصصة لمجموعة", callback_data="bc_single_select")],
         [InlineKeyboardButton("👤 إذاعة للمستخدمين (خاص)", callback_data="bc_users")],
+        [InlineKeyboardButton("📊 الإحصائيات وسجل المجموعات", callback_data="show_stats")],
         [InlineKeyboardButton("🔇 إدارة الوضع الصامت", callback_data="manage_silent")],
         [InlineKeyboardButton("🆘 نداء الاستغاثة", callback_data="manage_rescue")],
         [InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="manage_force_sub")],
-        [InlineKeyboardButton("🔎 مراقبة الكلمات", callback_data="manage_word_watch")],
-        [InlineKeyboardButton("🔇 كتم مستخدم", callback_data="manage_mute")],
+        [InlineKeyboardButton("⚙️ الإشعارات والحماية المتقدمة", callback_data="manage_settings")],
         [InlineKeyboardButton("📖 دليل أوامر الإشراف", callback_data="show_cmd_help")],
         [InlineKeyboardButton("👤 إضافة مشرف جديد", callback_data="add_admin")],
         [InlineKeyboardButton("⛔ الكلمات المحظورة", callback_data="manage_words"),
@@ -576,107 +493,33 @@ def get_stickers_keyboard(data):
     return InlineKeyboardMarkup(keyboard)
 
 
-# ---------- لوحات مراقبة الكلمات (ميزة جديدة) ----------
-def get_word_watch_main_keyboard():
+# ---------- لوحة الإشعارات والحماية المتقدمة (ميزة جديدة) ----------
+def get_settings_keyboard(data):
+    s = data.get("settings", {})
+
+    def st(key):
+        return "🟢" if s.get(key) else "🔴"
+
     keyboard = [
-        [InlineKeyboardButton("📌 المجموعات المستهدفة", callback_data="ww_targets")],
-        [InlineKeyboardButton("📝 الكلمات والعبارات", callback_data="ww_words")],
-        [InlineKeyboardButton("👥 مشرفو التنبيه", callback_data="ww_alert_admins")],
+        [InlineKeyboardButton(f"{st('notify_join_leave')} إشعاري عند إضافة/إخراج البوت", callback_data="cfg_toggle_notify_join_leave")],
+        [InlineKeyboardButton(f"{st('group_welcome')} رسالة ترحيب وتعليمات عند الإضافة", callback_data="cfg_toggle_group_welcome")],
+        [InlineKeyboardButton(f"{st('clean_service')} حذف رسائل الانضمام والمغادرة", callback_data="cfg_toggle_clean_service")],
+        [InlineKeyboardButton(f"{st('strikes_enabled')} نظام المخالفات والكتم التلقائي", callback_data="cfg_toggle_strikes_enabled")],
+        [InlineKeyboardButton(f"🔢 عدد المخالفات قبل الكتم: {s.get('strikes_limit')}", callback_data="cfg_strikes_limit")],
+        [InlineKeyboardButton(f"⏱️ مدة الكتم التلقائي: {s.get('strikes_minutes')} دقيقة", callback_data="cfg_strikes_minutes")],
         [InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="main_menu")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_ww_targets_keyboard(bot_data):
-    ww = bot_data.get("word_watch", {})
-    targets = ww.get("target_groups", {})
-    groups = bot_data.get("groups", {})
-    keyboard = []
-    for gid, enabled in targets.items():
-        gname = groups.get(gid, f"مجموعة #{gid}")
-        icon = "🟢" if enabled else "🔴"
-        keyboard.append([
-            InlineKeyboardButton(f"{icon} {gname}", callback_data=f"ww_targets_toggle_{gid}"),
-            InlineKeyboardButton("🗑️", callback_data=f"ww_targets_remove_{gid}")
-        ])
-    keyboard.append([InlineKeyboardButton("➕ إضافة مجموعة مستهدفة", callback_data="ww_targets_add")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="manage_word_watch")])
-    return InlineKeyboardMarkup(keyboard)
-
-
-def get_ww_targets_add_keyboard(bot_data):
-    ww = bot_data.get("word_watch", {})
-    targets = ww.get("target_groups", {})
-    groups = bot_data.get("groups", {})
-    keyboard = []
-    for gid, gname in groups.items():
-        if gid in targets:
-            continue
-        keyboard.append([InlineKeyboardButton(f"👥 {gname}", callback_data=f"ww_targets_add_{gid}")])
-    if not keyboard:
-        keyboard.append([InlineKeyboardButton("لا توجد مجموعات أخرى متاحة", callback_data="ww_targets")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="ww_targets")])
-    return InlineKeyboardMarkup(keyboard)
-
-
-def get_ww_words_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("➕ إضافة كلمة/عبارة", callback_data="ww_words_add")],
-        [InlineKeyboardButton("🗑️ حذف كلمة/عبارة", callback_data="ww_words_remove")],
-        [InlineKeyboardButton("♻️ استعادة القائمة الافتراضية", callback_data="ww_words_reset")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="manage_word_watch")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-
-def get_ww_alert_admins_groups_keyboard(bot_data):
-    ww = bot_data.get("word_watch", {})
-    targets = ww.get("target_groups", {})
-    groups = bot_data.get("groups", {})
-    keyboard = []
-    for gid in targets.keys():
-        gname = groups.get(gid, f"مجموعة #{gid}")
-        keyboard.append([InlineKeyboardButton(f"👥 {gname}", callback_data=f"ww_alert_admins_group_{gid}")])
-    if not keyboard:
-        keyboard.append([InlineKeyboardButton("لا توجد مجموعات مستهدفة بعد", callback_data="ww_targets")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="manage_word_watch")])
-    return InlineKeyboardMarkup(keyboard)
-
-
-def get_ww_alert_admins_manage_keyboard(gid, admins_list):
-    keyboard = []
-    for idx, username in enumerate(admins_list):
-        keyboard.append([InlineKeyboardButton(f"🗑️ {username}", callback_data=f"ww_alert_admins_remove_{gid}_{idx}")])
-    keyboard.append([InlineKeyboardButton("➕ إضافة مشرف تنبيه", callback_data=f"ww_alert_admins_add_{gid}")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="ww_alert_admins")])
-    return InlineKeyboardMarkup(keyboard)
-
-
-# ---------- لوحات نظام كتم المستخدمين (ميزة جديدة) ----------
-def get_mute_durations_keyboard(bot_data):
-    durations = get_all_mute_durations(bot_data)
-    keyboard = []
-    row = []
-    for label, seconds in durations:
-        row.append(InlineKeyboardButton(label, callback_data=f"mute_dur_{seconds}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("➕ إضافة مدة مخصصة", callback_data="mute_add_duration")])
-    if bot_data.get("custom_mute_durations"):
-        keyboard.append([InlineKeyboardButton("🗑️ حذف مدة مخصصة", callback_data="mute_remove_duration")])
-    keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data="main_menu")])
-    return InlineKeyboardMarkup(keyboard)
-
-
-def get_mute_remove_duration_keyboard(bot_data):
-    keyboard = []
-    for idx, item in enumerate(bot_data.get("custom_mute_durations", [])):
-        keyboard.append([InlineKeyboardButton(f"🗑️ {item.get('label')}", callback_data=f"mute_remove_duration_{idx}")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="manage_mute")])
-    return InlineKeyboardMarkup(keyboard)
+def get_settings_text():
+    return (
+        "⚙️ **الإشعارات والحماية المتقدمة**\n\n"
+        "• **إشعاري عند إضافة/إخراج البوت:** يصلك تنبيه فوري بحساب الشخص والمجموعة والرابط والوقت.\n"
+        "• **رسالة الترحيب:** تظهر مؤقتاً داخل المجموعة وتشرح الصلاحيات المطلوبة للبوت.\n"
+        "• **حذف رسائل الانضمام والمغادرة:** يبقي المجموعة نظيفة.\n"
+        "• **نظام المخالفات:** من يكرر مخالفة الفلاتر خلال ساعة يُكتم تلقائياً للمدة المحددة."
+    )
 
 
 # ---------- لوحات الاشتراك الإجباري (ميزة جديدة) ----------
@@ -742,8 +585,11 @@ def format_force_sub_info(gid, cfg, groups):
     )
 
 
-def build_force_sub_join_keyboard(cfg):
-    """يبني لوحة (زر الانضمام للقناة + زر إعادة التحقق) لعرضها للعضو غير المشترك."""
+def build_force_sub_join_keyboard(cfg, target_user_id=None):
+    """
+    يبني لوحة (زر الانضمام للقناة + زر إعادة التحقق) لعرضها للعضو غير المشترك.
+    زر التحقق مرتبط بمعرّف العضو المستهدف حتى لا يستطيع غيره الضغط عليه وحذف الرسالة.
+    """
     url = None
     if cfg.get("channel_username"):
         url = f"https://t.me/{cfg['channel_username']}"
@@ -753,8 +599,65 @@ def build_force_sub_join_keyboard(cfg):
     buttons = []
     if url:
         buttons.append([InlineKeyboardButton("📢 الانضمام إلى القناة", url=url)])
-    buttons.append([InlineKeyboardButton("✅ تحقق مرة أخرى", callback_data="fs_recheck")])
+    recheck_data = f"fs_recheck_{target_user_id}" if target_user_id else "fs_recheck"
+    buttons.append([InlineKeyboardButton("✅ تحقق مرة أخرى", callback_data=recheck_data)])
     return InlineKeyboardMarkup(buttons)
+
+
+# ---------- الإحصائيات وسجل المجموعات (ميزة جديدة) ----------
+def build_stats_html(data):
+    groups = data.get("groups", {})
+    info = data.get("groups_info", {})
+    removed = data.get("removed_groups", {})
+    fs_active = sum(1 for c in data.get("force_sub_groups", {}).values() if c.get("enabled"))
+
+    lines = [
+        "📊 <b>الإحصائيات وسجل المجموعات</b>",
+        "",
+        f"• المجموعات النشطة: <b>{len(groups)}</b>",
+        f"• مستخدمو البوت (الخاص): <b>{len(data.get('users', []))}</b>",
+        f"• مشرفو البوت: <b>{len(data.get('admins', []))}</b>",
+        f"• مجموعات الاشتراك الإجباري المفعّل: <b>{fs_active}</b>",
+        "",
+        "👥 <b>المجموعات:</b>",
+    ]
+
+    total_len = sum(len(x) for x in lines)
+    shown = 0
+    for i, (gid, title) in enumerate(groups.items(), 1):
+        inf = info.get(gid)
+        entry = f"{i}. {h(title)}"
+        if inf:
+            adder = user_mention_html(inf.get("added_by_id"), inf.get("added_by_name", "غير معروف"))
+            if inf.get("added_by_username"):
+                adder += f" (@{h(inf['added_by_username'])})"
+            entry += f"\n   ↳ أضافه: {adder} • {h(inf.get('added_at', '-'))}"
+            if inf.get("link"):
+                entry += f' • <a href="{h(inf["link"])}">رابط المجموعة</a>'
+        else:
+            entry += "\n   ↳ <i>مصدر الإضافة غير مسجّل (أُضيف قبل تفعيل التتبع)</i>"
+        if total_len + len(entry) > 3300:
+            break
+        lines.append(entry)
+        total_len += len(entry)
+        shown += 1
+
+    if shown < len(groups):
+        lines.append(f"… و {len(groups) - shown} مجموعة أخرى.")
+
+    if removed:
+        lines.append("")
+        lines.append("🚪 <b>آخر المجموعات التي أُخرج منها البوت:</b>")
+        for gid, r in list(removed.items())[-5:]:
+            entry = f"• {h(r.get('title', gid))} — {h(r.get('removed_at', '-'))}"
+            if r.get("removed_by_name"):
+                entry += f" — بواسطة {h(r['removed_by_name'])}"
+            if total_len + len(entry) > 3900:
+                break
+            lines.append(entry)
+            total_len += len(entry)
+
+    return "\n".join(lines)
 
 
 async def send_non_admin_response(update: Update):
@@ -764,9 +667,9 @@ async def send_non_admin_response(update: Update):
     PRIVATE_MSG_TRACK[user_id] = count
 
     if count <= 1:
-        await update.message.reply_text(NON_ADMIN_INFO_TEXT, parse_mode='Markdown')
+        await safe_reply_text(update.message, NON_ADMIN_INFO_TEXT)
     else:
-        await update.message.reply_text(NON_ADMIN_SPAM_TEXT, parse_mode='Markdown')
+        await safe_reply_text(update.message, NON_ADMIN_SPAM_TEXT)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -782,11 +685,261 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_non_admin_response(update)
 
 
+# === 4.5 تتبع إضافة/إخراج البوت من المجموعات (ميزة جديدة) ===
+def _in_chat(chat_member):
+    """هل العضو (البوت هنا) موجود فعلاً داخل الدردشة؟"""
+    if chat_member.status in ("member", "administrator", "creator"):
+        return True
+    if chat_member.status == "restricted":
+        return bool(getattr(chat_member, "is_member", True))
+    return False
+
+
+async def notify_admins(context: ContextTypes.DEFAULT_TYPE, text, keyboard=None):
+    """يرسل إشعاراً لكل مشرفي البوت (بصيغة HTML)."""
+    data = load_data()
+    for admin_id in data.get("admins", []):
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=text,
+                parse_mode='HTML',
+                reply_markup=keyboard,
+                disable_web_page_preview=True
+            )
+        except Exception:
+            # قد يكون المشرف لم يبدأ البوت بعد أو حظره؛ لا نوقف الإشعار لبقية المشرفين
+            pass
+
+
+async def get_group_link(context: ContextTypes.DEFAULT_TYPE, chat, stored_link=None):
+    """
+    يحاول جلب رابط المجموعة دون إتلاف أي رابط قائم:
+    1) اليوزر العام  2) رابط محفوظ سابقاً  3) رابط الدعوة الأساسي إن كان البوت مشرفاً
+    4) إنشاء رابط دعوة إضافي (لا يُلغي الروابط الحالية) إن كانت لديه الصلاحية.
+    """
+    if getattr(chat, "username", None):
+        return f"https://t.me/{chat.username}"
+    if stored_link:
+        return stored_link
+    try:
+        full = await context.bot.get_chat(chat.id)
+        if getattr(full, "username", None):
+            return f"https://t.me/{full.username}"
+        if getattr(full, "invite_link", None):
+            return full.invite_link
+    except Exception:
+        pass
+    try:
+        invite = await context.bot.create_chat_invite_link(chat.id, name="BotOwner")
+        return invite.invite_link
+    except Exception:
+        return None
+
+
+async def send_group_welcome(context: ContextTypes.DEFAULT_TYPE, chat, is_admin):
+    if is_admin:
+        text = (
+            "🛡️ شكراً لإضافتي! تم تفعيل البوت كمشرف ✅\n"
+            f"لتفعيل ميزات الحماية الكاملة داخل المجموعة تواصل مع المطور {DEVELOPER_USERNAME}."
+        )
+    else:
+        text = (
+            "🛡️ شكراً لإضافتي إلى المجموعة!\n\n"
+            "لأتمكن من حماية المجموعة يرجى رفعي إلى **مشرف** مع تفعيل الصلاحيات التالية:\n"
+            "• حذف الرسائل\n"
+            "• حظر المستخدمين\n"
+            "• دعوة المستخدمين عبر رابط\n\n"
+            f"ولتفعيل ميزات الحماية تواصل مع المطور {DEVELOPER_USERNAME}."
+        )
+    try:
+        msg = await context.bot.send_message(chat_id=chat.id, text=text)
+        asyncio.create_task(delete_after_delay(msg, 90))
+    except Exception:
+        pass
+
+
+async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يُستدعى عند أي تغيير في حالة البوت داخل مجموعة/قناة: إضافة، إخراج، ترقية، تنزيل."""
+    cmu = update.my_chat_member
+    if not cmu:
+        return
+
+    chat = cmu.chat
+    if chat.type == "private":
+        return
+
+    try:
+        actor = cmu.from_user
+        old_cm = cmu.old_chat_member
+        new_cm = cmu.new_chat_member
+        was_in = _in_chat(old_cm)
+        now_in = _in_chat(new_cm)
+
+        data = load_data()
+        settings = data.get("settings", {})
+        notify = settings.get("notify_join_leave", True)
+        gid = str(chat.id)
+        is_group = chat.type in ("group", "supergroup")
+        kind = "مجموعة" if is_group else "قناة"
+        title = chat.title or "بدون اسم"
+
+        # ---------- 1) تمت إضافة البوت ----------
+        if now_in and not was_in:
+            stored = data["groups_info"].get(gid, {})
+            link = await get_group_link(context, chat, stored.get("link"))
+            try:
+                members_count = await context.bot.get_chat_member_count(chat.id)
+            except Exception:
+                members_count = "غير متاح"
+
+            now_time = local_now_str()
+            if is_group:
+                data["groups"][gid] = title
+                data["groups_info"][gid] = {
+                    "title": title,
+                    "chat_type": chat.type,
+                    "added_by_id": actor.id,
+                    "added_by_name": actor.full_name,
+                    "added_by_username": actor.username,
+                    "added_at": now_time,
+                    "link": link
+                }
+                data["removed_groups"].pop(gid, None)
+                save_data(data)
+
+            bot_is_admin = new_cm.status == "administrator"
+
+            if notify:
+                if link:
+                    link_html = '<a href="' + h(link) + '">فتح ' + kind + '</a>'
+                else:
+                    link_html = 'غير متاح (خاصة والبوت ليس مشرفاً)'
+                text = (
+                    f"✅ <b>تمت إضافة البوت إلى {kind} جديدة!</b>\n\n"
+                    f"📛 <b>الاسم:</b> {h(title)}\n"
+                    f"🆔 <b>المعرّف:</b> <code>{chat.id}</code>\n"
+                    f"🔗 <b>الرابط:</b> {link_html}\n"
+                    f"👥 <b>عدد الأعضاء:</b> {members_count}\n"
+                    f"🤖 <b>حالة البوت:</b> {'مشرف ✅' if bot_is_admin else 'عضو عادي ⚠️ (لن يعمل الحذف قبل ترقيته)'}\n\n"
+                    f"👤 <b>الشخص الذي أضافه:</b>\n{user_details_html(actor)}\n\n"
+                    f"🕒 <b>الوقت:</b> {h(now_time)}"
+                )
+                rows = [[InlineKeyboardButton("👤 التواصل مع الشخص", url=user_contact_url(actor))]]
+                if link:
+                    rows.append([InlineKeyboardButton(f"🔗 فتح {kind}", url=link)])
+                rows.append([InlineKeyboardButton(f"🚪 إخراج البوت من هذه {kind}", callback_data=f"leave_ask_{chat.id}")])
+                await notify_admins(context, text, InlineKeyboardMarkup(rows))
+
+            if is_group and settings.get("group_welcome", True):
+                await send_group_welcome(context, chat, bot_is_admin)
+            return
+
+        # ---------- 2) تم إخراج البوت ----------
+        if was_in and not now_in:
+            info = data["groups_info"].pop(gid, {})
+            data["groups"].pop(gid, None)
+            RESCUE_TRACK.pop(chat.id, None)
+
+            bot_left_by_self = actor.id == context.bot.id
+            now_time = local_now_str()
+
+            if is_group:
+                data["removed_groups"][gid] = {
+                    "title": title,
+                    "removed_at": now_time,
+                    "removed_by_id": actor.id,
+                    "removed_by_name": actor.full_name,
+                    "added_by_name": info.get("added_by_name"),
+                    "link": info.get("link")
+                }
+                # نحتفظ بآخر 50 سجلاً فقط
+                if len(data["removed_groups"]) > 50:
+                    for old_key in list(data["removed_groups"].keys())[:-50]:
+                        data["removed_groups"].pop(old_key, None)
+            save_data(data)
+
+            if notify:
+                if bot_left_by_self:
+                    who = "غادر البوت بأمر منك (من لوحة الإشعارات)"
+                    who_block = ""
+                else:
+                    reason = "حظر البوت وطرده" if new_cm.status == "kicked" else "إخراج البوت (أو مغادرته)"
+                    who = reason
+                    who_block = f"\n\n👤 <b>الشخص الذي قام بذلك:</b>\n{user_details_html(actor)}"
+
+                adder_block = ""
+                if info.get("added_by_id"):
+                    adder_name = user_mention_html(info["added_by_id"], info.get("added_by_name", "غير معروف"))
+                    adder_block = f"\n\n➕ <b>كان قد أضافه:</b> {adder_name} بتاريخ {h(info.get('added_at', '-'))}"
+
+                link = info.get("link") or (f"https://t.me/{chat.username}" if getattr(chat, "username", None) else None)
+                if link:
+                    link_html = '<a href="' + h(link) + '">فتح ' + kind + '</a>'
+                else:
+                    link_html = 'غير متاح'
+                text = (
+                    f"🚪 <b>تم إخراج البوت من {kind}!</b>\n\n"
+                    f"📛 <b>الاسم:</b> {h(title)}\n"
+                    f"🆔 <b>المعرّف:</b> <code>{chat.id}</code>\n"
+                    f"🔗 <b>الرابط:</b> {link_html}\n"
+                    f"📌 <b>السبب:</b> {who}"
+                    f"{who_block}{adder_block}\n\n"
+                    f"🕒 <b>الوقت:</b> {h(now_time)}"
+                )
+                rows = []
+                if not bot_left_by_self:
+                    rows.append([InlineKeyboardButton("👤 التواصل مع الشخص", url=user_contact_url(actor))])
+                if link:
+                    rows.append([InlineKeyboardButton(f"🔗 فتح {kind}", url=link)])
+                await notify_admins(context, text, InlineKeyboardMarkup(rows) if rows else None)
+            return
+
+        # ---------- 3) تغيّرت صلاحيات البوت (ترقية/تنزيل) ----------
+        if was_in and now_in and old_cm.status != new_cm.status and notify:
+            if new_cm.status == "administrator":
+                missing = []
+                if not getattr(new_cm, "can_delete_messages", False):
+                    missing.append("حذف الرسائل")
+                if not getattr(new_cm, "can_restrict_members", False):
+                    missing.append("حظر/كتم المستخدمين")
+                if not getattr(new_cm, "can_invite_users", False):
+                    missing.append("دعوة المستخدمين")
+                warn = ("\n⚠️ <b>صلاحيات ناقصة:</b> " + "، ".join(missing)) if missing else "\n✅ جميع الصلاحيات الأساسية مفعّلة."
+                text = (
+                    f"⬆️ <b>تمت ترقية البوت إلى مشرف في {kind}</b>\n\n"
+                    f"📛 {h(title)}\n🆔 <code>{chat.id}</code>\n"
+                    f"👤 بواسطة: {user_mention_html(actor.id, actor.full_name)}"
+                    f"{warn}\n\n🕒 {h(local_now_str())}"
+                )
+                await notify_admins(context, text)
+            elif old_cm.status == "administrator":
+                text = (
+                    f"⬇️ <b>تم تنزيل البوت من الإشراف في {kind}</b>\n\n"
+                    f"📛 {h(title)}\n🆔 <code>{chat.id}</code>\n"
+                    f"👤 بواسطة: {user_mention_html(actor.id, actor.full_name)}\n"
+                    "⚠️ لن يتمكن البوت من الحذف والإشراف حتى تتم ترقيته من جديد.\n\n"
+                    f"🕒 {h(local_now_str())}"
+                )
+                await notify_admins(context, text)
+    except Exception:
+        logging.exception("خطأ أثناء معالجة تغيّر حالة البوت داخل مجموعة/قناة")
+
+
 # === 5. التحكم في الأزرار ===
 async def handle_force_sub_recheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالجة زر '✅ تحقق مرة أخرى' الذي يظهر لأي عضو داخل المجموعة (وليس فقط للمشرفين)."""
     query = update.callback_query
     chat_id = query.message.chat.id
+
+    # الزر الجديد يحمل معرّف العضو المستهدف: لا يسمح لغيره بالتحكم برسالته
+    parts = query.data.split("_")
+    if len(parts) >= 3 and parts[2].isdigit():
+        target_id = int(parts[2])
+        if query.from_user.id != target_id:
+            await query.answer("❌ هذا الزر مخصص للعضو المذكور في الرسالة فقط.", show_alert=True)
+            return
+
     bot_data = load_data()
     fs_config = bot_data.get("force_sub_groups", {}).get(str(chat_id))
 
@@ -801,12 +954,13 @@ async def handle_force_sub_recheck(update: Update, context: ContextTypes.DEFAULT
     channel_id = fs_config.get("channel_id")
     try:
         member = await context.bot.get_chat_member(channel_id, query.from_user.id)
-        subscribed = member.status not in ['left', 'kicked']
+        subscribed = member_is_subscribed(member)
     except Exception:
         await query.answer("⚠️ تعذر التحقق حالياً، يرجى المحاولة مرة أخرى بعد قليل.", show_alert=True)
         return
 
     if subscribed:
+        FS_WARN_TRACK.pop((chat_id, query.from_user.id), None)
         await query.answer("✅ تم التحقق بنجاح! يمكنك الآن إرسال الرسائل في المجموعة.", show_alert=True)
         try:
             await query.message.delete()
@@ -822,7 +976,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = query.data
 
     # زر التحقق من الاشتراك الإجباري متاح لأي عضو داخل المجموعة (وليس فقط أدمن البوت)
-    if action == "fs_recheck":
+    if action == "fs_recheck" or action.startswith("fs_recheck_"):
         await handle_force_sub_recheck(update, context)
         return
 
@@ -867,6 +1021,73 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "داخل المجموعة المستهدفة، يتم تفعيل الوضع الصامت تلقائياً."
         )
         await query.message.edit_text(help_text, parse_mode='Markdown', reply_markup=get_back_keyboard())
+
+    # ---------- الإحصائيات وسجل المجموعات (جديد) ----------
+    elif action == "show_stats":
+        try:
+            await query.message.edit_text(
+                build_stats_html(bot_data),
+                parse_mode='HTML',
+                reply_markup=get_back_keyboard(),
+                disable_web_page_preview=True
+            )
+        except Exception:
+            logging.exception("فشل عرض الإحصائيات")
+            await query.message.edit_text("❌ تعذّر عرض الإحصائيات حالياً.", reply_markup=get_back_keyboard())
+
+    # ---------- الإشعارات والحماية المتقدمة (جديد) ----------
+    elif action == "manage_settings":
+        await safe_edit_text(query.message, get_settings_text(), reply_markup=get_settings_keyboard(bot_data))
+
+    elif action.startswith("cfg_toggle_"):
+        key = action.replace("cfg_toggle_", "")
+        if key in DEFAULT_SETTINGS and isinstance(DEFAULT_SETTINGS[key], bool):
+            bot_data["settings"][key] = not bot_data["settings"].get(key, DEFAULT_SETTINGS[key])
+            save_data(bot_data)
+        await safe_edit_text(query.message, get_settings_text(), reply_markup=get_settings_keyboard(bot_data))
+
+    elif action == "cfg_strikes_limit":
+        WAITING_STATES[user_id] = "cfg_strikes_limit"
+        await query.message.edit_text(
+            "🔢 **أرسل عدد المخالفات التي يُكتم بعدها العضو تلقائياً (رقم):**",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard("manage_settings")
+        )
+
+    elif action == "cfg_strikes_minutes":
+        WAITING_STATES[user_id] = "cfg_strikes_minutes"
+        await query.message.edit_text(
+            "⏱️ **أرسل مدة الكتم التلقائي بالدقائق (رقم):**",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard("manage_settings")
+        )
+
+    # ---------- إخراج البوت من مجموعة عبر الإشعار (جديد) ----------
+    elif action.startswith("leave_ask_"):
+        gid = action.replace("leave_ask_", "")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ نعم، غادر الآن", callback_data=f"leave_do_{gid}")],
+            [InlineKeyboardButton("❌ تراجع", callback_data="dismiss_msg")]
+        ])
+        await query.message.reply_text(
+            f"⚠️ هل أنت متأكد من إخراج البوت من هذه الدردشة؟\n`{gid}`",
+            parse_mode='Markdown',
+            reply_markup=kb
+        )
+
+    elif action.startswith("leave_do_"):
+        gid = action.replace("leave_do_", "")
+        try:
+            await context.bot.leave_chat(int(gid))
+            await query.message.edit_text("✅ غادر البوت الدردشة بنجاح.")
+        except Exception as e:
+            await query.message.edit_text(f"❌ تعذّرت المغادرة: {e}")
+
+    elif action == "dismiss_msg":
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
 
     # ---------- الوضع الصامت ----------
     elif action == "manage_silent":
@@ -1026,12 +1247,13 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         WAITING_STATES[user_id] = "rescue_set_message"
         await query.message.edit_text("✏️ **أرسل رسالة النداء الجديدة التي تظهر عند تفعيل الوضع الصامت تلقائياً:**", reply_markup=get_back_keyboard("manage_rescue"))
 
-    # ---------- الاشتراك الإجباري (ميزة جديدة) ----------
+    # ---------- الاشتراك الإجباري ----------
     elif action == "manage_force_sub":
         await query.message.edit_text(
             "📢 **إدارة الاشتراك الإجباري**\n\n"
             "من هنا يمكنك تفعيل الاشتراك الإجباري بشكل مستقل لكل مجموعة على حدة، بحيث يُطلب من "
-            "الأعضاء الاشتراك في قناة محددة (خاصة بتلك المجموعة) قبل السماح لهم بالكتابة.",
+            "الأعضاء الاشتراك في قناة محددة (خاصة بتلك المجموعة) قبل السماح لهم بالكتابة.\n\n"
+            "💡 تُرسل رسالة التنبيه مع منشن (تاغ) للعضو المعني ليعلم أنها موجهة له خصيصاً.",
             parse_mode='Markdown',
             reply_markup=get_force_sub_list_keyboard(bot_data)
         )
@@ -1149,7 +1371,10 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ---------- الإذاعات ----------
     elif action == "bc_all":
         WAITING_STATES[user_id] = "bc_msg_all"
-        await query.message.edit_text("📝 **أرسل الآن منشور الإذاعة العامة للمجموعات:**", reply_markup=get_back_keyboard())
+        await query.message.edit_text(
+            "📝 **أرسل الآن منشور الإذاعة العامة، وسيصل إلى جميع المجموعات دفعة واحدة:**",
+            reply_markup=get_back_keyboard()
+        )
 
     elif action == "bc_users":
         WAITING_STATES[user_id] = "bc_msg_users"
@@ -1268,262 +1493,17 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_data(bot_data)
         await query.message.edit_text("✅ تم تحديث إعداد حظر الملصقات المتحركة و GIF.", reply_markup=get_stickers_keyboard(bot_data))
 
-    # ---------- مراقبة الكلمات والعبارات (ميزة جديدة) ----------
-    elif action == "manage_word_watch":
-        ww = bot_data.get("word_watch", {})
-        targets_count = len(ww.get("target_groups", {}))
-        words_count = len(ww.get("words", []))
-        msg = (
-            "🔎 **نظام مراقبة الكلمات والعبارات**\n\n"
-            f"• المجموعات المستهدفة: {targets_count}\n"
-            f"• عدد الكلمات/العبارات المراقبة: {words_count}\n\n"
-            "من هنا تستطيع تحديد المجموعات التي يعمل بها النظام، وإدارة قائمة الكلمات، "
-            "وتحديد المشرفين الذين يتم تنبيههم عند اكتشاف مخالفة."
-        )
-        await query.message.edit_text(msg, parse_mode='Markdown', reply_markup=get_word_watch_main_keyboard())
 
-    elif action == "ww_targets":
-        await query.message.edit_text(
-            "📌 **المجموعات المستهدفة بمراقبة الكلمات:**\n\n"
-            "اضغط على اسم المجموعة لتفعيل/تعطيل المراقبة فيها، أو 🗑️ لإزالتها من القائمة.",
-            parse_mode='Markdown',
-            reply_markup=get_ww_targets_keyboard(bot_data)
-        )
-
-    elif action == "ww_targets_add":
-        if not bot_data.get("groups"):
-            await query.message.edit_text("❌ لا توجد مجموعات مسجلة بعد.", reply_markup=get_back_keyboard("ww_targets"))
-            return
-        await query.message.edit_text(
-            "🎯 **اختر المجموعة لإضافتها إلى المراقبة:**",
-            parse_mode='Markdown',
-            reply_markup=get_ww_targets_add_keyboard(bot_data)
-        )
-
-    elif action.startswith("ww_targets_add_"):
-        gid = action.replace("ww_targets_add_", "")
-        bot_data["word_watch"]["target_groups"][gid] = True
-        save_data(bot_data)
-        await query.message.edit_text("✅ تم إضافة المجموعة إلى المراقبة بنجاح.", reply_markup=get_ww_targets_keyboard(bot_data))
-
-    elif action.startswith("ww_targets_toggle_"):
-        gid = action.replace("ww_targets_toggle_", "")
-        targets = bot_data["word_watch"]["target_groups"]
-        if gid in targets:
-            targets[gid] = not targets[gid]
-            save_data(bot_data)
-        await query.message.edit_text("تم تحديث حالة المراقبة لهذه المجموعة.", reply_markup=get_ww_targets_keyboard(bot_data))
-
-    elif action.startswith("ww_targets_remove_"):
-        gid = action.replace("ww_targets_remove_", "")
-        bot_data["word_watch"]["target_groups"].pop(gid, None)
-        bot_data["word_watch"]["alert_admins"].pop(gid, None)
-        save_data(bot_data)
-        await query.message.edit_text("✅ تم إزالة المجموعة من المراقبة.", reply_markup=get_ww_targets_keyboard(bot_data))
-
-    elif action == "ww_words":
-        words = bot_data.get("word_watch", {}).get("words", [])
-        words_text = "، ".join(words) if words else "لا توجد كلمات"
-        await query.message.edit_text(
-            f"📝 **الكلمات والعبارات المراقبة:**\n\n{words_text}",
-            parse_mode='Markdown',
-            reply_markup=get_ww_words_keyboard()
-        )
-
-    elif action == "ww_words_add":
-        WAITING_STATES[user_id] = "ww_words_add"
-        await query.message.edit_text(
-            "✏️ **أرسل الكلمة أو العبارة المراد إضافتها.**\n"
-            "يمكنك إرسال أكثر من كلمة دفعة واحدة، كل واحدة في سطر منفصل.",
-            parse_mode='Markdown',
-            reply_markup=get_back_keyboard("ww_words")
-        )
-
-    elif action == "ww_words_remove":
-        WAITING_STATES[user_id] = "ww_words_remove"
-        await query.message.edit_text(
-            "🗑️ **أرسل الكلمة أو العبارة المراد حذفها بالضبط كما تظهر في القائمة:**",
-            parse_mode='Markdown',
-            reply_markup=get_back_keyboard("ww_words")
-        )
-
-    elif action == "ww_words_reset":
-        bot_data["word_watch"]["words"] = list(DEFAULT_WATCH_WORDS)
-        save_data(bot_data)
-        await query.message.edit_text("✅ تم استعادة القائمة الافتراضية للكلمات المراقبة.", reply_markup=get_ww_words_keyboard())
-
-    elif action == "ww_alert_admins":
-        await query.message.edit_text(
-            "👥 **مشرفو التنبيه**\n\nاختر المجموعة لإدارة قائمة المشرفين الذين يتم تنبيههم فيها عند اكتشاف كلمة مستهدفة:",
-            parse_mode='Markdown',
-            reply_markup=get_ww_alert_admins_groups_keyboard(bot_data)
-        )
-
-    elif action.startswith("ww_alert_admins_group_"):
-        gid = action.replace("ww_alert_admins_group_", "")
-        admins_list = bot_data.get("word_watch", {}).get("alert_admins", {}).get(gid, [])
-        gname = bot_data.get("groups", {}).get(gid, f"مجموعة #{gid}")
-        admins_text = "\n".join(admins_list) if admins_list else "لا يوجد مشرفون بعد"
-        await query.message.edit_text(
-            f"👥 **مشرفو التنبيه لمجموعة {gname}:**\n\n{admins_text}",
-            parse_mode='Markdown',
-            reply_markup=get_ww_alert_admins_manage_keyboard(gid, admins_list)
-        )
-
-    elif action.startswith("ww_alert_admins_add_"):
-        gid = action.replace("ww_alert_admins_add_", "")
-        WAITING_STATES[user_id] = f"ww_alert_admins_add_{gid}"
-        await query.message.edit_text(
-            "✏️ **أرسل معرّف المشرف بالشكل التالي:**\n\n`@username`",
-            parse_mode='Markdown',
-            reply_markup=get_back_keyboard(f"ww_alert_admins_group_{gid}")
-        )
-
-    elif action.startswith("ww_alert_admins_remove_"):
-        remainder = action.replace("ww_alert_admins_remove_", "")
-        gid, idx_str = remainder.rsplit("_", 1)
-        try:
-            idx = int(idx_str)
-            admins_list = bot_data["word_watch"]["alert_admins"].get(gid, [])
-            if 0 <= idx < len(admins_list):
-                admins_list.pop(idx)
-                save_data(bot_data)
-        except Exception:
-            pass
-        admins_list = bot_data.get("word_watch", {}).get("alert_admins", {}).get(gid, [])
-        gname = bot_data.get("groups", {}).get(gid, f"مجموعة #{gid}")
-        admins_text = "\n".join(admins_list) if admins_list else "لا يوجد مشرفون بعد"
-        await query.message.edit_text(
-            f"👥 **مشرفو التنبيه لمجموعة {gname}:**\n\n{admins_text}",
-            parse_mode='Markdown',
-            reply_markup=get_ww_alert_admins_manage_keyboard(gid, admins_list)
-        )
-
-    # ---------- نظام كتم المستخدمين (ميزة جديدة) ----------
-    elif action == "manage_mute":
-        TEMP_MUTE[user_id] = {}
-        WAITING_STATES[user_id] = "mute_forward_wait"
-        await query.message.edit_text(
-            "🔇 **كتم مستخدم**\n\n"
-            "قم بإعادة توجيه (Forward) رسالة المستخدم المخالف إلى هذا البوت هنا، "
-            "وسأقوم بتحديد هويته ثم أطلب منك اختيار المجموعة ومدة الكتم.",
-            parse_mode='Markdown',
-            reply_markup=get_back_keyboard("main_menu")
-        )
-
-    elif action.startswith("mute_select_group_"):
-        gid = action.replace("mute_select_group_", "")
-        temp = TEMP_MUTE.get(user_id)
-        if not temp or not temp.get("target_user_id"):
-            await query.message.edit_text("❌ انتهت صلاحية العملية، يرجى البدء من جديد.", reply_markup=get_back_keyboard("main_menu"))
-            return
-        temp["chat_id"] = gid
-        await query.message.edit_text(
-            f"⏱ **اختر مدة كتم {temp.get('target_user_name', 'المستخدم')}:**",
-            parse_mode='Markdown',
-            reply_markup=get_mute_durations_keyboard(bot_data)
-        )
-
-    elif action.startswith("mute_dur_"):
-        seconds_str = action.replace("mute_dur_", "")
-        temp = TEMP_MUTE.get(user_id)
-        if not temp or not temp.get("target_user_id") or not temp.get("chat_id"):
-            await query.message.edit_text("❌ انتهت صلاحية العملية، يرجى البدء من جديد.", reply_markup=get_back_keyboard("main_menu"))
-            return
-        try:
-            seconds = int(seconds_str)
-        except ValueError:
-            await query.message.edit_text("❌ مدة غير صحيحة.", reply_markup=get_back_keyboard("main_menu"))
-            return
-
-        chat_id = int(temp["chat_id"])
-        target_user_id = temp["target_user_id"]
-        target_user_name = temp.get("target_user_name", "المستخدم")
-
-        try:
-            member_check = await context.bot.get_chat_member(chat_id, target_user_id)
-            if member_check.status in ['left', 'kicked']:
-                await query.message.edit_text("❌ فشل الكتم: هذا المستخدم غير موجود داخل المجموعة.", reply_markup=get_back_keyboard("main_menu"))
-                return
-        except Exception as e:
-            await query.message.edit_text(f"❌ فشل الكتم: تعذر التحقق من عضوية المستخدم ({e}).", reply_markup=get_back_keyboard("main_menu"))
-            return
-
-        try:
-            bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
-            if bot_member.status != 'administrator' or not getattr(bot_member, "can_restrict_members", True):
-                await query.message.edit_text("❌ فشل الكتم: البوت لا يملك صلاحية تقييد الأعضاء داخل هذه المجموعة.", reply_markup=get_back_keyboard("main_menu"))
-                return
-        except Exception as e:
-            await query.message.edit_text(f"❌ فشل الكتم: تعذر التحقق من صلاحيات البوت ({e}).", reply_markup=get_back_keyboard("main_menu"))
-            return
-
-        until_date = datetime.now() + timedelta(seconds=seconds)
-        try:
-            permissions = ChatPermissions(can_send_messages=False)
-            await context.bot.restrict_chat_member(chat_id, target_user_id, permissions=permissions, until_date=until_date)
-        except Exception as e:
-            await query.message.edit_text(f"❌ فشل تنفيذ الكتم فعلياً: {e}", reply_markup=get_back_keyboard("main_menu"))
-            return
-
-        register_active_mute(bot_data, chat_id, target_user_id, target_user_name, until_date.timestamp())
-
-        duration_label = None
-        for lbl, secs in get_all_mute_durations(bot_data):
-            if secs == seconds:
-                duration_label = lbl
-                break
-        if not duration_label:
-            duration_label = format_mute_duration_label(seconds)
-        try:
-            member_obj = await context.bot.get_chat_member(chat_id, target_user_id)
-            mention = build_user_mention_html(member_obj.user)
-        except Exception:
-            mention = html.escape(target_user_name)
-
-        group_text = (
-            f"🔇 تم كتم {mention} بسبب تجاوزات/مخالفات.\n\n"
-            f"⏱ مدة الكتم: {duration_label}\n"
-            f"🚫 لن يتمكن من إرسال الرسائل خلال هذه المدة."
-        )
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=group_text, parse_mode='HTML')
-        except Exception:
-            pass
-
-        TEMP_MUTE.pop(user_id, None)
-        WAITING_STATES[user_id] = None
-        await query.message.edit_text(f"✅ تم كتم {target_user_name} لمدة {duration_label} بنجاح.", reply_markup=get_back_keyboard("main_menu"))
-
-    elif action == "mute_add_duration":
-        WAITING_STATES[user_id] = "mute_add_duration"
-        await query.message.edit_text(
-            "➕ **أرسل المدة الجديدة، مثال:**\n\n`5 ساعات` أو `12 ساعة` أو `5 أيام` أو `30 دقيقة`",
-            parse_mode='Markdown',
-            reply_markup=get_back_keyboard("manage_mute")
-        )
-
-    elif action == "mute_remove_duration":
-        await query.message.edit_text(
-            "🗑️ **اختر المدة المخصصة المراد حذفها:**",
-            parse_mode='Markdown',
-            reply_markup=get_mute_remove_duration_keyboard(bot_data)
-        )
-
-    elif action.startswith("mute_remove_duration_"):
-        idx_str = action.replace("mute_remove_duration_", "")
-        try:
-            idx = int(idx_str)
-            custom = bot_data.get("custom_mute_durations", [])
-            if 0 <= idx < len(custom):
-                custom.pop(idx)
-                save_data(bot_data)
-        except Exception:
-            pass
-        await query.message.edit_text("✅ تم حذف المدة المخصصة.", reply_markup=get_mute_remove_duration_keyboard(bot_data))
+# === 6. تنفيذ عملية الإذاعة (محسّنة: إرسال متزامن + تنظيف الوجهات الميتة + تقرير مفصل) ===
+def _classify_send_error(err):
+    """يصنّف خطأ الإرسال: dead = الوجهة لم تعد صالحة (طُرد البوت/حُذفت المجموعة/حُظر البوت)."""
+    msg = str(err).lower()
+    dead_markers = ["blocked", "kicked", "chat not found", "deleted", "not a member", "deactivated", "forbidden"]
+    if any(marker in msg for marker in dead_markers):
+        return "dead"
+    return "fail"
 
 
-# === 6. تنفيذ عملية الإذاعة ===
 async def execute_broadcast(context: ContextTypes.DEFAULT_TYPE, user_id: int, status_msg, reply_markup):
     data_bc = TEMP_BROADCAST.get(user_id)
     if not data_bc:
@@ -1534,28 +1514,72 @@ async def execute_broadcast(context: ContextTypes.DEFAULT_TYPE, user_id: int, st
     msg_to_copy = data_bc["msg"]
     bot_data = load_data()
 
-    sent, failed = 0, 0
     await status_msg.edit_text("⏳ جاري الإذاعة...")
 
     targets = []
     if bc_type == "all":
         targets = list(bot_data.get("groups", {}).keys())
     elif bc_type == "users":
-        targets = bot_data.get("users", [])
+        targets = list(bot_data.get("users", []))
     elif bc_type.startswith("single_"):
         targets = [bc_type.replace("single_", "")]
 
-    for target_id in targets:
-        try:
-            await msg_to_copy.copy(chat_id=int(target_id), reply_markup=reply_markup)
-            sent += 1
-            await asyncio.sleep(0.1)
-        except Exception:
-            failed += 1
+    sem = asyncio.Semaphore(15)
+
+    async def send_one(target_id):
+        async with sem:
+            for _ in range(2):
+                try:
+                    await msg_to_copy.copy(chat_id=int(target_id), reply_markup=reply_markup)
+                    return target_id, "ok"
+                except RetryAfter as e:
+                    wait = e.retry_after
+                    wait = wait.total_seconds() if hasattr(wait, "total_seconds") else float(wait)
+                    await asyncio.sleep(wait + 1)
+                except (Forbidden, BadRequest) as e:
+                    return target_id, _classify_send_error(e)
+                except Exception:
+                    return target_id, "fail"
+            return target_id, "fail"
+
+    results = await asyncio.gather(*[send_one(t) for t in targets]) if targets else []
+
+    sent = sum(1 for _, r in results if r == "ok")
+    failed_ids = [t for t, r in results if r != "ok"]
+    dead_ids = [t for t, r in results if r == "dead"]
+
+    # تنظيف الوجهات الميتة تلقائياً (مجموعات طُرد منها البوت / مستخدمون حظروا البوت)
+    removed_count = 0
+    if dead_ids:
+        if bc_type == "users":
+            for t in dead_ids:
+                try:
+                    bot_data["users"].remove(int(t))
+                    removed_count += 1
+                except (ValueError, KeyError):
+                    pass
+        else:
+            for t in dead_ids:
+                if bot_data["groups"].pop(str(t), None) is not None:
+                    removed_count += 1
+        save_data(bot_data)
 
     TEMP_BROADCAST.pop(user_id, None)
     WAITING_STATES[user_id] = None
-    await status_msg.edit_text(f"✅ تمت الإذاعة بنجاح!\n- نجاح: {sent}\n- فشل: {failed}", reply_markup=get_back_keyboard())
+
+    report = f"✅ تمت الإذاعة!\n- نجاح: {sent}\n- فشل: {len(failed_ids)}"
+    if removed_count:
+        label = "مستخدم حظر البوت" if bc_type == "users" else "مجموعة لم يعد البوت فيها"
+        report += f"\n- 🧹 تمت إزالة {removed_count} ({label}) من القائمة تلقائياً"
+    if failed_ids and bc_type != "users":
+        names = []
+        for t in failed_ids[:10]:
+            names.append(bot_data.get("groups", {}).get(str(t)) or str(t))
+        report += "\n\n⚠️ وجهات فشل الإرسال إليها:\n" + "\n".join(f"• {n}" for n in names)
+        if len(failed_ids) > 10:
+            report += f"\n… و {len(failed_ids) - 10} أخرى"
+
+    await status_msg.edit_text(report, reply_markup=get_back_keyboard())
 
 
 # === 7. معالجة الرسائل الخاصة بأدمن البوت ===
@@ -1686,6 +1710,31 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         save_data(bot_data)
         await update.message.reply_text("✅ تم تحديث رسالة النداء!", reply_markup=get_back_keyboard("manage_rescue"))
 
+    # ---------- إعدادات نظام المخالفات (جديد) ----------
+    elif state == "cfg_strikes_limit":
+        WAITING_STATES[user_id] = None
+        try:
+            value = int(update.message.text.strip())
+            if value < 1:
+                raise ValueError
+            bot_data["settings"]["strikes_limit"] = value
+            save_data(bot_data)
+            await update.message.reply_text(f"✅ تم تحديث عدد المخالفات قبل الكتم إلى: {value}", reply_markup=get_back_keyboard("manage_settings"))
+        except ValueError:
+            await update.message.reply_text("❌ يرجى إرسال رقم صحيح أكبر من صفر.", reply_markup=get_back_keyboard("manage_settings"))
+
+    elif state == "cfg_strikes_minutes":
+        WAITING_STATES[user_id] = None
+        try:
+            value = int(update.message.text.strip())
+            if value < 1:
+                raise ValueError
+            bot_data["settings"]["strikes_minutes"] = value
+            save_data(bot_data)
+            await update.message.reply_text(f"✅ تم تحديث مدة الكتم التلقائي إلى: {value} دقيقة", reply_markup=get_back_keyboard("manage_settings"))
+        except ValueError:
+            await update.message.reply_text("❌ يرجى إرسال رقم صحيح أكبر من صفر.", reply_markup=get_back_keyboard("manage_settings"))
+
     # ---------- استقبال رسالة القناة المُعاد توجيهها (الاشتراك الإجباري) ----------
     elif state.startswith("fs_forward_channel_"):
         gid = state.replace("fs_forward_channel_", "")
@@ -1763,113 +1812,6 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 )
             except Exception:
                 pass
-
-    # ---------- إضافة/حذف كلمات مراقبة الكلمات ----------
-    elif state == "ww_words_add":
-        WAITING_STATES[user_id] = None
-        raw_lines = [w.strip() for w in update.message.text.split("\n") if w.strip()]
-        words_list = bot_data["word_watch"].setdefault("words", [])
-        added = []
-        for w in raw_lines:
-            if w not in words_list:
-                words_list.append(w)
-                added.append(w)
-        save_data(bot_data)
-        if added:
-            await update.message.reply_text(f"✅ تم إضافة {len(added)} كلمة/عبارة بنجاح.", reply_markup=get_back_keyboard("ww_words"))
-        else:
-            await update.message.reply_text("⚠️ الكلمات المُرسلة موجودة بالفعل في القائمة.", reply_markup=get_back_keyboard("ww_words"))
-
-    elif state == "ww_words_remove":
-        WAITING_STATES[user_id] = None
-        word = update.message.text.strip()
-        words_list = bot_data["word_watch"].setdefault("words", [])
-        if word in words_list:
-            words_list.remove(word)
-            save_data(bot_data)
-            await update.message.reply_text(f"✅ تم حذف `{word}` من القائمة.", parse_mode='Markdown', reply_markup=get_back_keyboard("ww_words"))
-        else:
-            await update.message.reply_text("❌ لم يتم العثور على هذه الكلمة/العبارة في القائمة.", reply_markup=get_back_keyboard("ww_words"))
-
-    # ---------- إضافة مشرف تنبيه لمجموعة معينة ----------
-    elif state.startswith("ww_alert_admins_add_"):
-        gid = state.replace("ww_alert_admins_add_", "")
-        WAITING_STATES[user_id] = None
-        username = update.message.text.strip()
-        if not username.startswith("@"):
-            username = "@" + username
-        admins_map = bot_data["word_watch"].setdefault("alert_admins", {})
-        admins_list = admins_map.setdefault(gid, [])
-        if username not in admins_list:
-            admins_list.append(username)
-            save_data(bot_data)
-            await update.message.reply_text(f"✅ تم إضافة {username} كمشرف تنبيه لهذه المجموعة.", reply_markup=get_ww_alert_admins_manage_keyboard(gid, admins_list))
-        else:
-            await update.message.reply_text("⚠️ هذا المشرف مضاف بالفعل.", reply_markup=get_ww_alert_admins_manage_keyboard(gid, admins_list))
-
-    # ---------- إضافة مدة كتم مخصصة ----------
-    elif state == "mute_add_duration":
-        WAITING_STATES[user_id] = None
-        txt = update.message.text.strip()
-        match = re.match(r"^(\d+)\s*(دقيقة|دقائق|ساعة|ساعات|يوم|أيام)$", txt)
-        if not match:
-            await update.message.reply_text(
-                "❌ صيغة غير صحيحة. أرسلها مثل: `5 ساعات` أو `12 ساعة` أو `5 أيام` أو `30 دقيقة`",
-                parse_mode='Markdown',
-                reply_markup=get_back_keyboard("manage_mute")
-            )
-            return
-        value = int(match.group(1))
-        unit = match.group(2)
-        if unit in ("دقيقة", "دقائق"):
-            seconds = value * 60
-        elif unit in ("ساعة", "ساعات"):
-            seconds = value * 3600
-        else:
-            seconds = value * 86400
-
-        custom = bot_data.setdefault("custom_mute_durations", [])
-        custom.append({"label": txt, "seconds": seconds})
-        save_data(bot_data)
-        await update.message.reply_text(f"✅ تم إضافة المدة `{txt}` إلى قائمة مدد الكتم.", parse_mode='Markdown', reply_markup=get_back_keyboard("manage_mute"))
-
-    # ---------- استقبال الرسالة المُعاد توجيهها لتحديد المستخدم المراد كتمه ----------
-    elif state == "mute_forward_wait":
-        origin = getattr(update.message, "forward_origin", None)
-        legacy_user = getattr(update.message, "forward_from", None)
-
-        target_user = None
-        if legacy_user is not None:
-            target_user = legacy_user
-        elif origin is not None and getattr(origin, "type", None) == "user":
-            target_user = getattr(origin, "sender_user", None)
-
-        if not target_user:
-            await update.message.reply_text(
-                "❌ لم أتمكن من تحديد صاحب هذه الرسالة.\n\n"
-                "تأكد من أنها إعادة توجيه (Forward) حقيقية لرسالة المستخدم المخالف من داخل المجموعة "
-                "(وليست رسالة من قناة أو مستخدم مخفي الهوية).",
-                reply_markup=get_back_keyboard("main_menu")
-            )
-            return
-
-        TEMP_MUTE[user_id] = {
-            "target_user_id": target_user.id,
-            "target_user_name": target_user.first_name or "المستخدم",
-            "chat_id": None
-        }
-        WAITING_STATES[user_id] = None
-
-        if not bot_data.get("groups"):
-            await update.message.reply_text("❌ لا توجد مجموعات مسجلة بعد.", reply_markup=get_back_keyboard("main_menu"))
-            return
-
-        await update.message.reply_text(
-            f"👤 **تم تحديد المستخدم:** {target_user.first_name or 'المستخدم'}\n\n"
-            "🎯 **اختر المجموعة التي سيتم الكتم فيها:**",
-            parse_mode='Markdown',
-            reply_markup=get_groups_selection_keyboard(bot_data, "mute_select_group_", "main_menu")
-        )
 
 
 # === 8. أوامر الإشراف السريعة للمجموعات ===
@@ -2009,14 +1951,62 @@ def is_silent_active(bot_data, chat_id):
         return False
 
 
-async def delete_and_warn(msg, context, chat_id, first_name, reason):
+async def register_strike(context, chat_id, user_id):
+    """
+    نظام المخالفات: يسجّل مخالفة للعضو، وعند بلوغ الحد خلال ساعة يكتمه تلقائياً.
+    يعيد (تم_الكتم, عدد_المخالفات, الحد, مدة_الكتم) أو (False, 0, 0, 0) إذا كان النظام معطلاً.
+    """
+    settings = load_data().get("settings", {})
+    if not settings.get("strikes_enabled"):
+        return False, 0, 0, 0
+
+    limit = int(settings.get("strikes_limit", 3))
+    minutes = int(settings.get("strikes_minutes", 10))
+    key = (chat_id, user_id)
+    now_ts = datetime.now().timestamp()
+
+    track = STRIKE_TRACK.get(key)
+    if not track or now_ts - track["ts"] > 3600:
+        track = {"count": 0, "ts": now_ts}
+    track["count"] += 1
+    track["ts"] = now_ts
+    STRIKE_TRACK[key] = track
+
+    if track["count"] >= limit:
+        STRIKE_TRACK.pop(key, None)
+        try:
+            until_date = datetime.now() + timedelta(minutes=minutes)
+            await context.bot.restrict_chat_member(
+                chat_id, user_id,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=until_date
+            )
+            return True, limit, limit, minutes
+        except Exception:
+            return False, track["count"], limit, minutes
+
+    return False, track["count"], limit, minutes
+
+
+async def delete_and_warn(msg, context, chat_id, first_name, reason, user_id=None):
     try:
         await msg.delete()
-        warning_msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"عذراً يا {first_name}، يمنع استخدام ({reason}) في المجموعة!"
-        )
-        await asyncio.sleep(5)
+    except Exception:
+        return
+
+    try:
+        muted, count, limit, minutes = (False, 0, 0, 0)
+        if user_id:
+            muted, count, limit, minutes = await register_strike(context, chat_id, user_id)
+
+        text = f"عذراً يا {first_name}، يمنع استخدام ({reason}) في المجموعة!"
+        if muted:
+            text += f"\n🔇 تم كتمك لمدة {minutes} دقيقة بسبب تكرار المخالفات."
+        elif limit:
+            text += f"\n⚠️ مخالفة {count}/{limit} — عند تكرارها سيتم كتمك تلقائياً."
+
+        warning_msg = await context.bot.send_message(chat_id=chat_id, text=text)
+        await asyncio.sleep(10 if muted else 5)
         await warning_msg.delete()
     except Exception:
         pass
@@ -2098,6 +2088,7 @@ async def check_force_subscription(update, context, chat_id, bot_data, user_id, 
     يتحقق مما إذا كان العضو مشتركاً في القناة المطلوبة الخاصة بهذه المجموعة تحديداً
     (كل مجموعة لها قناتها المستقلة الخاصة بها).
     يعيد True للسماح بمرور الرسالة، أو False في حال تم حذفها بسبب عدم الاشتراك.
+    الرسالة التحذيرية تتضمن منشن (تاغ) للعضو المستهدف ليعلم أنها موجهة له خصيصاً.
     """
     fs_config = bot_data.get("force_sub_groups", {}).get(str(chat_id))
     if not fs_config or not fs_config.get("enabled"):
@@ -2106,7 +2097,7 @@ async def check_force_subscription(update, context, chat_id, bot_data, user_id, 
     channel_id = fs_config.get("channel_id")
     try:
         member = await context.bot.get_chat_member(channel_id, user_id)
-        subscribed = member.status not in ['left', 'kicked']
+        subscribed = member_is_subscribed(member)
     except Exception:
         # تعذر التحقق (غالباً بسبب فقدان صلاحية الإشراف داخل القناة)
         # نسمح بمرور الرسالة تفادياً لتعطيل المجموعة بالكامل بسبب خلل مؤقت في الصلاحيات
@@ -2120,60 +2111,35 @@ async def check_force_subscription(update, context, chat_id, bot_data, user_id, 
     except Exception:
         pass
 
+    # منع تكرار رسائل التنبيه لنفس العضو إذا أرسل عدة رسائل متتالية (تبقى رسائله محذوفة)
+    now_ts = datetime.now().timestamp()
+    last_ts = FS_WARN_TRACK.get((chat_id, user_id), 0)
+    if now_ts - last_ts < 25:
+        return False
+    FS_WARN_TRACK[(chat_id, user_id)] = now_ts
+
     channel_name = fs_config.get("channel_title") or "القناة"
+    mention = user_mention_html(user_id, first_name)
+    uname = getattr(update.effective_user, "username", None)
+    uname_part = f" (@{h(uname)})" if uname else ""
     text = (
-        f"🔒 عذراً يا {first_name}،\n"
-        f"يرجى الاشتراك أولاً في قناة «{channel_name}» حتى تتمكن من المشاركة وإرسال الرسائل داخل هذه المجموعة."
+        f"🔒 عذراً يا {mention}{uname_part}،\n\n"
+        f"⚠️ هذه الرسالة موجّهة إليك أنت خصيصاً.\n"
+        f"يرجى الاشتراك أولاً في قناة «{h(channel_name)}» حتى تتمكن من المشاركة وإرسال الرسائل داخل هذه المجموعة.\n\n"
+        "بعد الاشتراك اضغط على زر «تحقق مرة أخرى»."
     )
     try:
         warn = await context.bot.send_message(
             chat_id=chat_id,
             text=text,
-            reply_markup=build_force_sub_join_keyboard(fs_config)
+            parse_mode='HTML',
+            reply_markup=build_force_sub_join_keyboard(fs_config, user_id)
         )
         asyncio.create_task(delete_after_delay(warn, 25))
     except Exception:
         pass
 
     return False
-
-
-async def check_word_watch(update, context, chat_id, bot_data, text):
-    """
-    يفحص الرسالة بحثاً عن كلمات/عبارات مستهدفة إن كانت المجموعة ضمن المجموعات المستهدفة والمراقبة مفعّلة،
-    وعند الاكتشاف يرسل تنبيهاً للمشرفين المحددين لهذه المجموعة مع Mention حقيقي لصاحب الرسالة وللمشرفين.
-    """
-    ww = bot_data.get("word_watch", {})
-    targets = ww.get("target_groups", {})
-    if not targets.get(str(chat_id)):
-        return False
-
-    watched_words = ww.get("words", [])
-    found_word = detect_watched_word(text, watched_words)
-    if not found_word:
-        return False
-
-    user = update.effective_user
-    mention = build_user_mention_html(user) if user else "عضو"
-    group_name = bot_data.get("groups", {}).get(str(chat_id), "المجموعة")
-
-    alert_admins = ww.get("alert_admins", {}).get(str(chat_id), [])
-    admins_line = " ".join(alert_admins) if alert_admins else "لا يوجد مشرفون محددون لهذه المجموعة"
-
-    alert_text = (
-        "🚨 <b>تم اكتشاف كلمة مستهدفة</b>\n\n"
-        f"👤 العضو: {mention}\n"
-        f"🔎 الكلمة/العبارة المكتشفة: {html.escape(found_word)}\n"
-        f"📍 المجموعة: {html.escape(group_name)}\n\n"
-        f"{admins_line}"
-    )
-
-    try:
-        await context.bot.send_message(chat_id=chat_id, text=alert_text, parse_mode='HTML')
-    except Exception:
-        logging.exception("فشل إرسال تنبيه مراقبة الكلمات")
-
-    return True
 
 
 async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2191,6 +2157,15 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_group(chat_id, update.effective_chat.title or "مجموعة")
 
     bot_data = load_data()
+
+    # حذف رسائل الانضمام والمغادرة (إن كانت الميزة مفعلة)
+    if msg.new_chat_members or msg.left_chat_member:
+        if bot_data.get("settings", {}).get("clean_service"):
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+        return
 
     user_is_admin = False
     if user_id:
@@ -2226,14 +2201,14 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg.sticker:
         is_animated_or_video = bool(msg.sticker.is_animated or msg.sticker.is_video)
         if bot_data.get("block_animated_stickers") and is_animated_or_video:
-            await delete_and_warn(msg, context, chat_id, first_name, "ملصق متحرك")
+            await delete_and_warn(msg, context, chat_id, first_name, "ملصق متحرك", user_id)
             return
         if bot_data.get("block_stickers"):
-            await delete_and_warn(msg, context, chat_id, first_name, "ملصقات (ستيكرز)")
+            await delete_and_warn(msg, context, chat_id, first_name, "ملصقات (ستيكرز)", user_id)
             return
 
     if msg.animation and bot_data.get("block_animated_stickers"):
-        await delete_and_warn(msg, context, chat_id, first_name, "صورة متحركة GIF")
+        await delete_and_warn(msg, context, chat_id, first_name, "صورة متحركة GIF", user_id)
         return
 
     # فحص الكلمات والإيموجي والروابط الممنوعة + نداء الاستغاثة
@@ -2245,9 +2220,6 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     handled = await handle_rescue_keyword(update, context, chat_id, bot_data, text)
     if handled:
         return
-
-    # مراقبة الكلمات والعبارات (نظام مستقل جديد، لا يحذف الرسالة، فقط ينبّه المشرفين المحددين)
-    await check_word_watch(update, context, chat_id, bot_data, text)
 
     text_lower = text.lower()
 
@@ -2287,7 +2259,7 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
 
     if is_violating:
-        await delete_and_warn(msg, context, chat_id, first_name, reason)
+        await delete_and_warn(msg, context, chat_id, first_name, reason, user_id)
 
 
 # === 10. معالج أخطاء عام (شبكة أمان) ===
@@ -2319,6 +2291,10 @@ async def main():
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(button_click))
+
+    # تتبع إضافة/إخراج/ترقية البوت داخل المجموعات والقنوات (ميزة جديدة)
+    app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND), handle_private_message))
 
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.Regex(r"^/(حظر|كتم|الغاء_الحظر|الغاء_الكتم|ban|mute|unban|unmute)"), admin_actions_handler))
@@ -2330,8 +2306,10 @@ async def main():
     print("البوت يعمل بنجاح...")
     await app.initialize()
     await app.start()
-    asyncio.create_task(mute_watcher_loop(app))
-    await app.updater.start_polling(drop_pending_updates=True)
+    await app.updater.start_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query", "my_chat_member"]
+    )
     await asyncio.Event().wait()
 
 
