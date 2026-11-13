@@ -45,6 +45,9 @@ STRIKE_TRACK = {}
 # {(chat_id, user_id): timestamp}
 FS_WARN_TRACK = {}
 
+# مراجع لمهام المسح الجارية في الخلفية (حتى لا يجمعها جامع المهملات قبل انتهائها)
+BACKGROUND_TASKS = set()
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -57,8 +60,17 @@ DEFAULT_SETTINGS = {
     "clean_service": False,       # حذف رسائل انضمام/مغادرة الأعضاء
     "strikes_enabled": False,     # نظام المخالفات والكتم التلقائي
     "strikes_limit": 3,           # عدد المخالفات قبل الكتم
-    "strikes_minutes": 10         # مدة الكتم التلقائي بالدقائق
+    "strikes_minutes": 10,        # مدة الكتم التلقائي بالدقائق
+    "block_whispers": True,       # منع الهمسات (الرسائل المرسلة عبر بوتات إنلاين خارجية) حتى من المشرفين
+    "block_premium_stickers": True  # حذف الملصقات المتحركة/الفيديو الشبيه بالملصق من أصحاب الحسابات المميزة
 }
+
+# أوامر مسح الرسائل الافتراضية (يمكن للمشرف إضافة أوامر أخرى من لوحة التحكم)
+# الصيغة: <الأمر> <العدد>  مثال: مسح 100  أو  بوت امسح 100
+DEFAULT_PURGE_COMMANDS = ["مسح", "امسح", "بوت مسح", "بوت امسح"]
+
+# أقصى عدد رسائل يمكن مسحه في أمر واحد
+PURGE_MAX_COUNT = 5000
 
 # === نصوص ثابتة ===
 DEVELOPER_USERNAME = "@Nabil1r"
@@ -72,8 +84,12 @@ NON_ADMIN_INFO_TEXT = (
     "• حذف الكلمات الممنوعة.\n"
     "• حظر الروابط (جميعها أو نطاقات محددة).\n"
     "• حذف الملصقات (الستيكرز) والصور المتحركة GIF.\n"
+    "• منع الهمسات القادمة من البوتات الخارجية بشكل صارم.\n"
+    "• حذف الملصقات المتحركة المرسلة من أصحاب الحسابات المميزة.\n"
     "• نظام مخالفات يكتم المكرِّر تلقائياً لمدة محددة.\n"
     "• تنظيف رسائل انضمام ومغادرة الأعضاء.\n\n"
+    "🧹 **مسح الرسائل:** يستطيع مشرفو البوت (الذين هم مشرفون في المجموعة أيضاً) مسح آخر عدد محدد من الرسائل "
+    "بكتابة أمر مثل: مسح 100 أو بوت امسح 100.\n\n"
     "🔇 **الوضع الصامت:** تفعيل لمدة مؤقتة جاهزة، أو بجدول يومي (من/إلى) مع رسالة توضيحية للأعضاء.\n\n"
     "🆘 **نداء الاستغاثة:** عند تكرار الأعضاء لكلمة النداء يُفعَّل الوضع الصامت تلقائياً "
     "حتى يصل المشرفون، ويمكن للمشرف إلغاؤه بضغطة زر.\n\n"
@@ -133,7 +149,11 @@ def default_data():
         # سجل المجموعات التي أُخرج منها البوت (آخر 50)
         "removed_groups": {},
         # إعدادات الميزات الجديدة
-        "settings": dict(DEFAULT_SETTINGS)
+        "settings": dict(DEFAULT_SETTINGS),
+        # أوامر مسح الرسائل (قابلة للتعديل من لوحة المشرفين)
+        "purge_commands": list(DEFAULT_PURGE_COMMANDS),
+        # بوتات الإنلاين المسموح لها بالإرسال رغم منع الهمسات (يوزرات بدون @ وبأحرف صغيرة)
+        "allowed_inline_bots": []
     }
 
 
@@ -188,6 +208,10 @@ def load_data():
                 for key, value in DEFAULT_SETTINGS.items():
                     data["settings"].setdefault(key, value)
 
+                # أوامر المسح + بوتات الإنلاين المسموحة (تُضاف تلقائياً للبيانات القديمة)
+                data.setdefault("purge_commands", list(DEFAULT_PURGE_COMMANDS))
+                data.setdefault("allowed_inline_bots", [])
+
                 return data
         except Exception:
             pass
@@ -207,6 +231,19 @@ def is_bot_admin(user_id):
 async def is_group_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
     if is_bot_admin(user_id):
         return True
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        return member.status in ['creator', 'administrator']
+    except Exception:
+        return False
+
+
+async def is_real_group_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
+    """
+    يتحقق أن العضو مشرف فعلي (مالك/مشرف) داخل المجموعة نفسها.
+    على عكس is_group_admin، لا يكتفي بكون العضو مشرفاً للبوت؛ يُستخدم في أوامر المسح
+    التي تشترط أن يكون المنفّذ مشرفاً في البوت ومشرفاً في المجموعة معاً.
+    """
     try:
         member = await context.bot.get_chat_member(chat_id, user_id)
         return member.status in ['creator', 'administrator']
@@ -380,6 +417,106 @@ def member_is_subscribed(member):
     return True
 
 
+# === 3.5 أدوات مسح الرسائل (ميزة جديدة) ===
+_ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+
+
+def normalize_text_spaces(text):
+    """يوحّد المسافات (مسافة واحدة بين الكلمات) ويحذف الفراغات الزائدة."""
+    return " ".join(str(text or "").strip().split())
+
+
+def get_purge_commands(data):
+    """يعيد قائمة أوامر المسح الحالية (أو الافتراضية إن كانت فارغة/تالفة)."""
+    cmds = data.get("purge_commands")
+    if not isinstance(cmds, list) or not cmds:
+        return list(DEFAULT_PURGE_COMMANDS)
+    return [c for c in cmds if isinstance(c, str) and c.strip()]
+
+
+def match_purge_command(text, commands):
+    """
+    يفحص هل النص بصيغة «<أمر مسح> <عدد>» مثل: مسح 100 أو بوت امسح 1000.
+    يدعم الأرقام العربية الهندية (١٠٠). يعيد العدد (int) أو None إن لم يتطابق.
+    الأوامر الأطول تُفحص أولاً حتى لا يتداخل «مسح» مع «بوت مسح».
+    """
+    if not text:
+        return None
+    clean = normalize_text_spaces(text).translate(_ARABIC_DIGITS)
+    if not clean:
+        return None
+    for cmd in sorted(commands, key=len, reverse=True):
+        norm_cmd = normalize_text_spaces(cmd)
+        if not norm_cmd:
+            continue
+        m = re.match(r"^" + re.escape(norm_cmd) + r"\s+(\d{1,7})$", clean, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+async def _delete_single_message(bot, chat_id, message_id, sem):
+    """حذف رسالة واحدة (يُستخدم فقط كخطة بديلة إذا كانت نسخة المكتبة لا تدعم الحذف الجماعي)."""
+    async with sem:
+        for _ in range(2):
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=message_id)
+                return True, None
+            except RetryAfter as e:
+                wait = e.retry_after
+                wait = wait.total_seconds() if hasattr(wait, "total_seconds") else float(wait)
+                await asyncio.sleep(wait + 1)
+            except Exception as e:
+                return False, e
+        return False, None
+
+
+async def delete_message_ids(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ids):
+    """
+    يحذف قائمة معرّفات رسائل على دفعات (100 رسالة لكل طلب).
+    الرسائل غير الموجودة أو التي لا يمكن حذفها تُتخطى بصمت (سلوك تيليجرام).
+    يعيد (نجاح، أول_خطأ) حيث النجاح = False فقط عند وجود مشكلة صلاحيات حقيقية.
+    """
+    bot = context.bot
+    use_bulk = hasattr(bot, "delete_messages")
+    deleted_any = False
+    first_error = None
+
+    for i in range(0, len(ids), 100):
+        chunk = ids[i:i + 100]
+
+        if use_bulk:
+            for _ in range(3):
+                try:
+                    await bot.delete_messages(chat_id=chat_id, message_ids=chunk)
+                    deleted_any = True
+                    break
+                except RetryAfter as e:
+                    wait = e.retry_after
+                    wait = wait.total_seconds() if hasattr(wait, "total_seconds") else float(wait)
+                    await asyncio.sleep(wait + 1)
+                except Exception as e:
+                    if first_error is None:
+                        first_error = e
+                    break
+        else:
+            sem = asyncio.Semaphore(10)
+            results = await asyncio.gather(*[_delete_single_message(bot, chat_id, mid, sem) for mid in chunk])
+            for ok, err in results:
+                if ok:
+                    deleted_any = True
+                elif err is not None and first_error is None:
+                    first_error = err
+
+        await asyncio.sleep(0.3)
+
+    perm_error = False
+    if first_error is not None:
+        err_text = str(first_error).lower()
+        perm_error = any(k in err_text for k in ("rights", "can't be deleted", "forbidden", "not enough", "admin"))
+    return (deleted_any or not perm_error), first_error
+
+
 # === 4. القوائم واللوحات ===
 def get_main_admin_keyboard():
     keyboard = [
@@ -390,6 +527,7 @@ def get_main_admin_keyboard():
         [InlineKeyboardButton("🔇 إدارة الوضع الصامت", callback_data="manage_silent")],
         [InlineKeyboardButton("🆘 نداء الاستغاثة", callback_data="manage_rescue")],
         [InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="manage_force_sub")],
+        [InlineKeyboardButton("🧹 أوامر مسح الرسائل", callback_data="manage_purge")],
         [InlineKeyboardButton("⚙️ الإشعارات والحماية المتقدمة", callback_data="manage_settings")],
         [InlineKeyboardButton("📖 دليل أوامر الإشراف", callback_data="show_cmd_help")],
         [InlineKeyboardButton("👤 إضافة مشرف جديد", callback_data="add_admin")],
@@ -500,6 +638,8 @@ def get_settings_keyboard(data):
     def st(key):
         return "🟢" if s.get(key) else "🔴"
 
+    allowed_count = len(data.get("allowed_inline_bots", []))
+
     keyboard = [
         [InlineKeyboardButton(f"{st('notify_join_leave')} إشعاري عند إضافة/إخراج البوت", callback_data="cfg_toggle_notify_join_leave")],
         [InlineKeyboardButton(f"{st('group_welcome')} رسالة ترحيب وتعليمات عند الإضافة", callback_data="cfg_toggle_group_welcome")],
@@ -507,6 +647,9 @@ def get_settings_keyboard(data):
         [InlineKeyboardButton(f"{st('strikes_enabled')} نظام المخالفات والكتم التلقائي", callback_data="cfg_toggle_strikes_enabled")],
         [InlineKeyboardButton(f"🔢 عدد المخالفات قبل الكتم: {s.get('strikes_limit')}", callback_data="cfg_strikes_limit")],
         [InlineKeyboardButton(f"⏱️ مدة الكتم التلقائي: {s.get('strikes_minutes')} دقيقة", callback_data="cfg_strikes_minutes")],
+        [InlineKeyboardButton(f"{st('block_whispers')} 🤫 منع الهمسات (حتى من المشرفين)", callback_data="cfg_toggle_block_whispers")],
+        [InlineKeyboardButton(f"🤖 بوتات الإنلاين المسموحة: {allowed_count}", callback_data="manage_inline_bots")],
+        [InlineKeyboardButton(f"{st('block_premium_stickers')} 💎 منع الملصقات المتحركة من الحسابات المميزة", callback_data="cfg_toggle_block_premium_stickers")],
         [InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="main_menu")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -518,8 +661,59 @@ def get_settings_text():
         "• **إشعاري عند إضافة/إخراج البوت:** يصلك تنبيه فوري بحساب الشخص والمجموعة والرابط والوقت.\n"
         "• **رسالة الترحيب:** تظهر مؤقتاً داخل المجموعة وتشرح الصلاحيات المطلوبة للبوت.\n"
         "• **حذف رسائل الانضمام والمغادرة:** يبقي المجموعة نظيفة.\n"
-        "• **نظام المخالفات:** من يكرر مخالفة الفلاتر خلال ساعة يُكتم تلقائياً للمدة المحددة."
+        "• **نظام المخالفات:** من يكرر مخالفة الفلاتر خلال ساعة يُكتم تلقائياً للمدة المحددة.\n"
+        "• **منع الهمسات:** تُحذف فوراً أي رسالة مرسلة عبر بوت إنلاين خارجي (الهمسات) حتى لو كان مرسلها مشرفاً، "
+        "مع تنبيه صارم مختصر.\n"
+        "• **بوتات الإنلاين المسموحة:** استثناء بوتات معينة من المنع (مثل بوتات الصور أو GIF).\n"
+        "• **منع الملصقات المتحركة من الحسابات المميزة:** يحذف الملصقات المتحركة وفيديو الستيكر "
+        "وملصقات بريميوم المرسلة من أصحاب حسابات تيليجرام المميز (لا يشمل الفيديو العادي MP4)."
     )
+
+
+# ---------- لوحة أوامر مسح الرسائل (ميزة جديدة) ----------
+def get_purge_text(data):
+    cmds = get_purge_commands(data)
+    cmds_text = "\n".join(f"• `{c} 100`" for c in cmds)
+    return (
+        "🧹 **أوامر مسح الرسائل**\n\n"
+        "يكتب المشرف الأمر داخل المجموعة بصيغة: **الأمر + العدد** فيُحذف آخر عدد من الرسائل "
+        "(صور، فيديو، رسائل صوتية، نصوص... أي نوع) مع رسالة الأمر نفسها.\n\n"
+        "🔐 **شرط التنفيذ:** أن يكون المُنفِّذ مشرفاً في البوت **ومشرفاً في المجموعة** معاً.\n\n"
+        f"📌 **الأوامر الحالية (مثال بالعدد 100):**\n{cmds_text}\n\n"
+        f"الحد الأقصى في الأمر الواحد: {PURGE_MAX_COUNT} رسالة.\n"
+        "يمكنك إضافة أوامر جديدة أو حذف أي أمر بالأزرار أدناه."
+    )
+
+
+def get_purge_keyboard(data):
+    cmds = get_purge_commands(data)
+    keyboard = [[InlineKeyboardButton("➕ إضافة أمر مسح جديد", callback_data="purge_add")]]
+    for i, c in enumerate(cmds):
+        keyboard.append([InlineKeyboardButton(f"🗑️ حذف الأمر: {c}", callback_data=f"purge_del_{i}")])
+    keyboard.append([InlineKeyboardButton("♻️ استعادة الأوامر الافتراضية", callback_data="purge_reset")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="main_menu")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+# ---------- لوحة بوتات الإنلاين المسموحة (ميزة جديدة) ----------
+def get_inline_bots_text(data):
+    bots = data.get("allowed_inline_bots", [])
+    bots_text = "، ".join(f"@{b}" for b in bots) if bots else "لا توجد"
+    return (
+        "🤖 **بوتات الإنلاين المسموحة**\n\n"
+        "عند تفعيل «منع الهمسات» تُحذف أي رسالة مرسلة عبر بوت إنلاين (تظهر بعبارة via @bot) "
+        "حتى لو كان مرسلها مشرفاً، **إلا** البوتات المضافة في هذه القائمة.\n\n"
+        f"القائمة الحالية:\n{bots_text}"
+    )
+
+
+def get_inline_bots_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("➕ إضافة بوت مسموح", callback_data="inline_bot_add"),
+         InlineKeyboardButton("🗑️ مسح الكل", callback_data="inline_bot_clear")],
+        [InlineKeyboardButton("🔙 رجوع للإعدادات", callback_data="manage_settings")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
 
 # ---------- لوحات الاشتراك الإجباري (ميزة جديدة) ----------
@@ -1017,10 +1211,16 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `/كتم` أو `/كتم 30m` : كتم المستخدم.\n"
             "• `/الغاء_الحظر` : إزالة الحظر عن المستخدم بالرد عليه.\n"
             "• `/الغاء_الكتم` : السماح للمستخدم بالكتابة مجدداً بالرد عليه.\n\n"
+            "🧹 **أوامر مسح الرسائل (بدون رد):**\n"
+            "• `مسح 100` أو `بوت امسح 100` : حذف آخر 100 رسالة (صور، فيديو، صوتيات... أي نوع).\n"
+            "• `مسح 1000` : حذف آخر 1000 رسالة.\n"
+            f"• الحد الأقصى: {PURGE_MAX_COUNT} رسالة في الأمر الواحد.\n"
+            "• شرط التنفيذ: أن يكون المنفّذ مشرفاً في البوت **ومشرفاً في المجموعة** معاً.\n"
+            "• يمكنك إضافة أوامر مسح أخرى من زر «🧹 أوامر مسح الرسائل».\n\n"
             "🆘 **نداء الاستغاثة:** إذا كتب الأعضاء كلمة النداء المحددة عدداً من المرات المتتالية "
             "داخل المجموعة المستهدفة، يتم تفعيل الوضع الصامت تلقائياً."
         )
-        await query.message.edit_text(help_text, parse_mode='Markdown', reply_markup=get_back_keyboard())
+        await safe_edit_text(query.message, help_text, reply_markup=get_back_keyboard())
 
     # ---------- الإحصائيات وسجل المجموعات (جديد) ----------
     elif action == "show_stats":
@@ -1060,6 +1260,72 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⏱️ **أرسل مدة الكتم التلقائي بالدقائق (رقم):**",
             parse_mode='Markdown',
             reply_markup=get_back_keyboard("manage_settings")
+        )
+
+    # ---------- بوتات الإنلاين المسموحة (جديد) ----------
+    elif action == "manage_inline_bots":
+        WAITING_STATES[user_id] = None
+        await safe_edit_text(query.message, get_inline_bots_text(bot_data), reply_markup=get_inline_bots_keyboard())
+
+    elif action == "inline_bot_add":
+        WAITING_STATES[user_id] = "add_inline_bot"
+        await safe_edit_text(
+            query.message,
+            "✏️ **أرسل يوزر بوت الإنلاين المسموح (مثال: @gif):**",
+            reply_markup=get_back_keyboard("manage_inline_bots")
+        )
+
+    elif action == "inline_bot_clear":
+        bot_data["allowed_inline_bots"] = []
+        save_data(bot_data)
+        await safe_edit_text(query.message, get_inline_bots_text(bot_data), reply_markup=get_inline_bots_keyboard())
+
+    # ---------- أوامر مسح الرسائل (جديد) ----------
+    elif action == "manage_purge":
+        WAITING_STATES[user_id] = None
+        await safe_edit_text(query.message, get_purge_text(bot_data), reply_markup=get_purge_keyboard(bot_data))
+
+    elif action == "purge_add":
+        WAITING_STATES[user_id] = "add_purge_cmd"
+        await safe_edit_text(
+            query.message,
+            "✏️ **أرسل كلمة أو عبارة أمر المسح الجديد (بدون الرقم).**\n\n"
+            "مثال: إذا أرسلت `نظف` فسيصبح الأمر داخل المجموعة: `نظف 100`",
+            reply_markup=get_back_keyboard("manage_purge")
+        )
+
+    elif action.startswith("purge_del_"):
+        try:
+            idx = int(action.replace("purge_del_", ""))
+        except ValueError:
+            idx = -1
+        cmds = get_purge_commands(bot_data)
+        if len(cmds) <= 1:
+            await safe_edit_text(
+                query.message,
+                "⚠️ لا يمكن حذف آخر أمر مسح متبقٍ. أضف أمراً جديداً أولاً ثم احذف القديم.\n\n" + get_purge_text(bot_data),
+                reply_markup=get_purge_keyboard(bot_data)
+            )
+            return
+        if 0 <= idx < len(cmds):
+            removed_cmd = cmds.pop(idx)
+            bot_data["purge_commands"] = cmds
+            save_data(bot_data)
+            await safe_edit_text(
+                query.message,
+                f"✅ تم حذف الأمر: {removed_cmd}\n\n" + get_purge_text(bot_data),
+                reply_markup=get_purge_keyboard(bot_data)
+            )
+        else:
+            await safe_edit_text(query.message, get_purge_text(bot_data), reply_markup=get_purge_keyboard(bot_data))
+
+    elif action == "purge_reset":
+        bot_data["purge_commands"] = list(DEFAULT_PURGE_COMMANDS)
+        save_data(bot_data)
+        await safe_edit_text(
+            query.message,
+            "✅ تمت استعادة أوامر المسح الافتراضية.\n\n" + get_purge_text(bot_data),
+            reply_markup=get_purge_keyboard(bot_data)
         )
 
     # ---------- إخراج البوت من مجموعة عبر الإشعار (جديد) ----------
@@ -1735,6 +2001,54 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         except ValueError:
             await update.message.reply_text("❌ يرجى إرسال رقم صحيح أكبر من صفر.", reply_markup=get_back_keyboard("manage_settings"))
 
+    # ---------- إضافة أمر مسح جديد (جديد) ----------
+    elif state == "add_purge_cmd":
+        raw = update.message.text or ""
+        cmd = normalize_text_spaces(raw).translate(_ARABIC_DIGITS)
+        # نزيل أي رقم في نهاية النص إن أرسله المشرف مثل «نظف 100» ونحتفظ بالكلمة فقط
+        cmd = re.sub(r"\s*\d+$", "", cmd).strip()
+
+        if not cmd or len(cmd) > 30 or cmd.startswith("/") or re.search(r"[`*_\[\]]", cmd) or cmd.isdigit():
+            await update.message.reply_text(
+                "❌ أمر غير صالح. أرسل كلمة أو عبارة قصيرة (حتى 30 حرفاً) بدون رموز خاصة وبدون رقم، مثل: نظف\n"
+                "أو اضغط رجوع للإلغاء.",
+                reply_markup=get_back_keyboard("manage_purge")
+            )
+            return
+
+        WAITING_STATES[user_id] = None
+        cmds = get_purge_commands(bot_data)
+        if any(normalize_text_spaces(c).lower() == cmd.lower() for c in cmds):
+            await update.message.reply_text("⚠️ هذا الأمر موجود بالفعل.", reply_markup=get_back_keyboard("manage_purge"))
+            return
+        cmds.append(cmd)
+        bot_data["purge_commands"] = cmds
+        save_data(bot_data)
+        await safe_reply_text(
+            update.message,
+            f"✅ تمت إضافة أمر المسح: `{cmd}`\nاستخدمه داخل المجموعة هكذا: `{cmd} 100`",
+            reply_markup=get_back_keyboard("manage_purge")
+        )
+
+    # ---------- إضافة بوت إنلاين مسموح (جديد) ----------
+    elif state == "add_inline_bot":
+        raw = (update.message.text or "").strip()
+        uname = raw.replace("https://t.me/", "").replace("t.me/", "").lstrip("@").strip().lower()
+        if not re.match(r"^[a-z0-9_]{3,64}$", uname):
+            await update.message.reply_text(
+                "❌ يوزر غير صالح. أرسل يوزر البوت مثل: @gif\nأو اضغط رجوع للإلغاء.",
+                reply_markup=get_back_keyboard("manage_inline_bots")
+            )
+            return
+        WAITING_STATES[user_id] = None
+        allowed = bot_data.setdefault("allowed_inline_bots", [])
+        if uname in allowed:
+            await update.message.reply_text("⚠️ هذا البوت موجود بالفعل في القائمة.", reply_markup=get_back_keyboard("manage_inline_bots"))
+            return
+        allowed.append(uname)
+        save_data(bot_data)
+        await update.message.reply_text(f"✅ تم السماح لبوت الإنلاين @{uname}.", reply_markup=get_back_keyboard("manage_inline_bots"))
+
     # ---------- استقبال رسالة القناة المُعاد توجيهها (الاشتراك الإجباري) ----------
     elif state.startswith("fs_forward_channel_"):
         gid = state.replace("fs_forward_channel_", "")
@@ -2142,6 +2456,113 @@ async def check_force_subscription(update, context, chat_id, bot_data, user_id, 
     return False
 
 
+# ---------- منع الهمسات (ميزة جديدة) ----------
+async def handle_whisper_block(update: Update, context: ContextTypes.DEFAULT_TYPE, msg, chat_id) -> bool:
+    """
+    الهمسات تُرسَل عبر بوتات الإنلاين الخارجية، وتظهر في المجموعة كرسالة «via @bot» (الحقل via_bot).
+    عند تفعيل المنع تُحذف الرسالة فوراً حتى لو كان مرسلها مشرفاً في البوت والمجموعة،
+    ثم تُرسل ملاحظة صارمة مختصرة تُحذف تلقائياً بعد ثوانٍ.
+    يعيد True إذا حُذفت الرسالة.
+    """
+    via_bot = getattr(msg, "via_bot", None)
+    if not via_bot:
+        return False
+
+    data = load_data()
+    if not data.get("settings", {}).get("block_whispers", True):
+        return False
+
+    via_username = (getattr(via_bot, "username", None) or "").lower()
+    if via_username and via_username in data.get("allowed_inline_bots", []):
+        return False
+
+    try:
+        await msg.delete()
+    except Exception:
+        # لا توجد صلاحية حذف: لا يمكن المنع، نتجاوز بصمت
+        return False
+
+    try:
+        user = update.effective_user
+        if user and msg.sender_chat is None:
+            who = user_mention_html(user.id, user.first_name)
+        else:
+            who = "المشرف"
+        warn = await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🚫 {who}\nالهمسات ممنوعة منعاً باتاً في هذه المجموعة، وتم حذف رسالتك.",
+            parse_mode='HTML'
+        )
+        asyncio.create_task(delete_after_delay(warn, 6))
+    except Exception:
+        pass
+    return True
+
+
+# ---------- حذف الملصقات المتحركة من الحسابات المميزة (ميزة جديدة) ----------
+def is_premium_animated_sticker(msg, user):
+    """
+    يحدد هل الرسالة ملصق (ستيكر) متحرك/فيديو-ستيكر مرسل من حساب مميز (Premium).
+    - الملصقات ذات تأثير بريميوم (premium_animation) لا يرسلها إلا أصحاب الحسابات المميزة.
+    - الملصق المتحرك (TGS) وملصق الفيديو (WEBM) يُحذفان إذا كان مرسلهما مميزاً.
+    لا يشمل الفيديو العادي MP4 ولا الصور المتحركة GIF.
+    """
+    sticker = getattr(msg, "sticker", None)
+    if not sticker:
+        return False
+    if getattr(sticker, "premium_animation", None):
+        return True
+    sender_is_premium = bool(getattr(user, "is_premium", False)) if user else False
+    if sender_is_premium and (getattr(sticker, "is_animated", False) or getattr(sticker, "is_video", False)):
+        return True
+    return False
+
+
+# ---------- مسح آخر الرسائل (ميزة جديدة) ----------
+async def run_purge(context: ContextTypes.DEFAULT_TYPE, chat_id: int, command_msg_id: int, count: int, requester):
+    """
+    ينفّذ المسح: يحذف رسالة الأمر نفسها + آخر (count) رسالة سابقة لها بحسب تسلسل معرّفات الرسائل
+    (واجهة تيليجرام للبوتات لا تتيح جلب سجل الرسائل، لذا يُستخدم تسلسل المعرّفات).
+    """
+    ids = [i for i in range(command_msg_id, command_msg_id - count - 1, -1) if i >= 1]
+    ok, error = await delete_message_ids(context, chat_id, ids)
+
+    if ok:
+        text = f"🧹 تم تنفيذ أمر المسح لآخر {count} رسالة بواسطة {user_mention_html(requester.id, requester.first_name)}."
+    else:
+        logging.warning("فشل أمر المسح: %s", error)
+        text = (
+            "❌ تعذّر تنفيذ المسح.\n"
+            "تأكد أن البوت مشرف في المجموعة ولديه صلاحية «حذف الرسائل»."
+        )
+    try:
+        notice = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
+        asyncio.create_task(delete_after_delay(notice, 6))
+    except Exception:
+        pass
+
+
+async def handle_purge_command(update: Update, context: ContextTypes.DEFAULT_TYPE, msg, chat_id, count):
+    """يتحقق من حدود العدد ثم يشغّل المسح في الخلفية حتى لا يتعطل البوت أثناء المسح الكبير."""
+    if count < 1:
+        return
+
+    if count > PURGE_MAX_COUNT:
+        try:
+            warn = await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ الحد الأقصى للمسح في الأمر الواحد هو {PURGE_MAX_COUNT} رسالة."
+            )
+            asyncio.create_task(delete_after_delay(warn, 6))
+        except Exception:
+            pass
+        return
+
+    task = asyncio.create_task(run_purge(context, chat_id, msg.message_id, count, update.effective_user))
+    BACKGROUND_TASKS.add(task)
+    task.add_done_callback(BACKGROUND_TASKS.discard)
+
+
 async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat:
         return
@@ -2149,8 +2570,17 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     chat_id = update.effective_chat.id
 
-    # استثناء منشورات القناة المربوطة والرسائل المرسلة باسم الأدمن المتخفي (GroupAnonymousBot / اسم المجموعة)
-    if msg.is_automatic_forward or (msg.sender_chat and msg.sender_chat.id == chat_id):
+    # استثناء منشورات القناة المربوطة
+    if msg.is_automatic_forward:
+        return
+
+    # منع الهمسات: يُفحص قبل أي استثناء لأنه يشمل المشرفين أيضاً (حتى الأدمن المتخفي)
+    if getattr(msg, "via_bot", None):
+        if await handle_whisper_block(update, context, msg, chat_id):
+            return
+
+    # استثناء الرسائل المرسلة باسم الأدمن المتخفي (GroupAnonymousBot / اسم المجموعة)
+    if msg.sender_chat and msg.sender_chat.id == chat_id:
         return
 
     user_id = update.effective_user.id if update.effective_user else None
@@ -2166,6 +2596,14 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         return
+
+    # أوامر مسح الرسائل: «مسح 100» / «بوت امسح 100» ... (مشرف بوت + مشرف مجموعة معاً)
+    if msg.text and user_id:
+        purge_count = match_purge_command(msg.text, get_purge_commands(bot_data))
+        if purge_count is not None:
+            if user_id in bot_data.get("admins", []) and await is_real_group_admin(context, chat_id, user_id):
+                await handle_purge_command(update, context, msg, chat_id, purge_count)
+                return
 
     user_is_admin = False
     if user_id:
@@ -2195,6 +2633,12 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id:
         allowed = await check_force_subscription(update, context, chat_id, bot_data, user_id, first_name)
         if not allowed:
+            return
+
+    # حذف الملصقات المتحركة/فيديو الستيكر/ملصقات بريميوم من أصحاب الحسابات المميزة
+    if msg.sticker and bot_data.get("settings", {}).get("block_premium_stickers", True):
+        if is_premium_animated_sticker(msg, update.effective_user):
+            await delete_and_warn(msg, context, chat_id, first_name, "ملصق متحرك من حساب مميز", user_id)
             return
 
     # فحص الملصقات (ستيكرز) والصور المتحركة GIF
