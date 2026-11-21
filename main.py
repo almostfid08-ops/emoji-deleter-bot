@@ -1,4 +1,6 @@
 import os
+import time
+import math
 import logging
 import asyncio
 import json
@@ -21,6 +23,7 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 INITIAL_ADMINS = [1611988598, 7065061464]
 DATA_FILE = "bot_data.json"
+ACTIVITY_FILE = "member_activity.json"
 
 # توقيت الجزائر (UTC+1 بدون توقيت صيفي) يُستخدم في الإشعارات فقط
 LOCAL_TZ = timezone(timedelta(hours=1))
@@ -48,10 +51,91 @@ FS_WARN_TRACK = {}
 # مراجع لمهام المسح الجارية في الخلفية (حتى لا يجمعها جامع المهملات قبل انتهائها)
 BACKGROUND_TASKS = set()
 
+# ---------- حالة التاغ الجماعي (وقتية، غير محفوظة) ----------
+# عمليات التاغ الجارية: {chat_id: {"id": int, "cancelled": bool, ...}}
+TAG_JOBS = {}
+# قوائم الاختيار المعلّقة: {(chat_id, menu_message_id): {...}}
+TAG_PENDING = {}
+# عدّاد معرّفات عمليات التاغ (لمنع تأثير أزرار قديمة على عملية جديدة)
+TAG_JOB_SEQ = {"n": 0}
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+
+
+# === سجل نشاط الأعضاء (يُستخدم في التاغ الجماعي) ===
+# تيليجرام لا تتيح للبوتات جلب قائمة أعضاء المجموعة، لذلك يسجّل البوت آخر رسالة كتبها كل عضو
+# (وانضمام الأعضاء ومغادرتهم). يُحفظ في ملف مستقل عن bot_data.json حتى لا يؤثر على بياناتك الحالية،
+# ويُكتب على القرص بشكل دوري (كل 20 ثانية عند وجود تغيير) بدل كتابته مع كل رسالة.
+# الصيغة: {group_id(str): {user_id(str): {"n": الاسم, "t": وقت آخر رسالة (0 = لم يكتب بعد)}}}
+ACTIVITY_STATE = {"dirty": False}
+
+
+def load_activity():
+    if os.path.exists(ACTIVITY_FILE):
+        try:
+            with open(ACTIVITY_FILE, "r", encoding="utf-8") as f:
+                content = json.load(f)
+                if isinstance(content, dict):
+                    return content
+        except Exception:
+            logging.exception("تعذّر قراءة ملف نشاط الأعضاء، سيبدأ سجل جديد")
+    return {}
+
+
+MEMBER_ACTIVITY = load_activity()
+
+
+def flush_activity():
+    """يحفظ سجل النشاط على القرص (كتابة آمنة عبر ملف مؤقت) إن وُجدت تغييرات."""
+    if not ACTIVITY_STATE["dirty"]:
+        return
+    ACTIVITY_STATE["dirty"] = False
+    try:
+        tmp_path = ACTIVITY_FILE + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(MEMBER_ACTIVITY, f, ensure_ascii=False)
+        os.replace(tmp_path, ACTIVITY_FILE)
+    except Exception:
+        ACTIVITY_STATE["dirty"] = True
+        logging.exception("فشل حفظ ملف نشاط الأعضاء")
+
+
+async def activity_flush_loop():
+    while True:
+        await asyncio.sleep(20)
+        try:
+            flush_activity()
+        except Exception:
+            logging.exception("خطأ في حلقة حفظ النشاط")
+
+
+def record_activity(chat_id, user, is_message=True):
+    """
+    يسجّل العضو في سجل المجموعة.
+    is_message=True  → يحدّث وقت آخر رسالة (نشاط كتابي).
+    is_message=False → يسجّل العضو فقط (مثل الانضمام) دون اعتباره نشاطاً كتابياً.
+    """
+    if not user or getattr(user, "is_bot", False):
+        return
+    grp = MEMBER_ACTIVITY.setdefault(str(chat_id), {})
+    uid = str(user.id)
+    rec = grp.get(uid) or {"n": "", "t": 0}
+    name = (getattr(user, "full_name", None) or getattr(user, "first_name", None) or "عضو").strip()[:40] or "عضو"
+    rec["n"] = name
+    if is_message:
+        rec["t"] = int(time.time())
+    grp[uid] = rec
+    ACTIVITY_STATE["dirty"] = True
+
+
+def forget_member(chat_id, user_id):
+    grp = MEMBER_ACTIVITY.get(str(chat_id))
+    if grp and grp.pop(str(user_id), None) is not None:
+        ACTIVITY_STATE["dirty"] = True
+
 
 # الإعدادات الافتراضية للميزات الجديدة (تُدمج تلقائياً مع أي بيانات قديمة دون التأثير عليها)
 DEFAULT_SETTINGS = {
@@ -72,6 +156,32 @@ DEFAULT_PURGE_COMMANDS = ["مسح", "امسح", "بوت مسح", "بوت امس�
 # أقصى عدد رسائل يمكن مسحه في أمر واحد
 PURGE_MAX_COUNT = 5000
 
+# === إعدادات التاغ الجماعي ===
+TAG_BATCH_SIZE = 10          # عدد الأعضاء في كل رسالة
+TAG_BATCH_DELAY = 2.5        # الفاصل بين كل رسالتين (ثوانٍ) لتفادي حدود تيليجرام
+DEFAULT_TAG_MESSAGE = "📢 نداء لأعضاء المجموعة"
+TAG_MESSAGE_MAX_LEN = 500
+TAG_PENDING_TTL = 900        # مدة صلاحية قائمة الاختيار (ثوانٍ)
+
+# (المفتاح، عدد الأيام، نص الزر)
+TAG_PERIODS = [
+    ("7", 7, "🕐 آخر 7 أيام"),
+    ("20", 20, "📅 آخر 20 يوماً"),
+    ("30", 30, "🗓️ آخر 30 يوماً"),
+    ("60", 60, "📆 آخر 60 يوماً"),
+]
+TAG_PERIOD_DAYS = {"7": 7, "20": 20, "30": 30, "60": 60, "all": None}
+TAG_PERIOD_LABELS = {
+    "7": "آخر 7 أيام (أسبوع)",
+    "20": "آخر 20 يوماً",
+    "30": "آخر 30 يوماً (شهر)",
+    "60": "آخر 60 يوماً (شهران)",
+    "all": "الجميع بدون استثناء",
+}
+
+# أوامر التاغ داخل المجموعة: /تاغ  /tag  /tagall  /منشن  أو كلمة «تاغ» / «منشن» وحدها
+TAG_CMD_REGEX = r"^(?:/(?:tagall|tag|تاغ|منشن)(?:@\w+)?(?:\s|$)|(?:تاغ|منشن)\s*$)"
+
 # === نصوص ثابتة ===
 DEVELOPER_USERNAME = "@Nabil1r"
 
@@ -90,13 +200,16 @@ NON_ADMIN_INFO_TEXT = (
     "• تنظيف رسائل انضمام ومغادرة الأعضاء.\n\n"
     "🧹 **مسح الرسائل:** يستطيع مشرفو البوت (الذين هم مشرفون في المجموعة أيضاً) مسح آخر عدد محدد من الرسائل "
     "بكتابة أمر مثل: مسح 100 أو بوت امسح 100.\n\n"
+    "🏷️ **التاغ الجماعي:** منشن أعضاء المجموعة حسب نشاطهم (آخر 7 / 20 / 30 / 60 يوماً أو الجميع) "
+    "على دفعات من 10 أعضاء في كل رسالة، مع زر إلغاء فوري للمشرفين.\n\n"
     "🔇 **الوضع الصامت:** تفعيل لمدة مؤقتة جاهزة، أو بجدول يومي (من/إلى) مع رسالة توضيحية للأعضاء.\n\n"
     "🆘 **نداء الاستغاثة:** عند تكرار الأعضاء لكلمة النداء يُفعَّل الوضع الصامت تلقائياً "
     "حتى يصل المشرفون، ويمكن للمشرف إلغاؤه بضغطة زر.\n\n"
     "📢 **الاشتراك الإجباري:** لكل مجموعة قناتها المستقلة؛ يُحذف كلام غير المشترك ويُوجَّه له تنبيه "
     "**بمنشن باسمه** يعلمه أن الرسالة موجهة له، مع زر انضمام وزر تحقق فوري.\n\n"
     "⚖️ **أوامر الإشراف السريعة (بالرد على الرسالة):** حظر، كتم، إلغاء الحظر، إلغاء الكتم — دائماً أو لمدة محددة.\n\n"
-    "📣 **الإذاعة:** إرسال إعلان واحد لكل المجموعات دفعة واحدة، أو لمجموعة محددة، أو لمستخدمي البوت، مع أزرار روابط ملونة.\n\n"
+    "📣 **الإذاعة:** إرسال إعلان واحد لكل المجموعات دفعة واحدة، أو لمجموعة محددة، أو للقنوات، أو لمستخدمي البوت، "
+    "مع أزرار روابط ملونة، وخيار **تثبيت** الإعلان بعد إرساله.\n\n"
     "🔔 **تنبيه المطور:** يصل المطور إشعار فوري عند إضافة البوت إلى أي مجموعة أو إخراجه منها، "
     "ويتضمن حساب الشخص والمجموعة والرابط والوقت.\n\n"
     f"للحصول على هذه الميزات داخل مجموعتك، يرجى التواصل مع مطور البوت {DEVELOPER_USERNAME} "
@@ -116,6 +229,8 @@ NON_ADMIN_SPAM_TEXT = (
 def default_data():
     return {
         "groups": {},
+        # القنوات المسجّلة للإذاعة (المفتاح = معرّف القناة كنص)
+        "channels": {},
         "users": [],
         "admins": list(INITIAL_ADMINS),
         "emojis": ["😂", "🤣", "💩"],
@@ -169,6 +284,7 @@ def load_data():
 
                 data.setdefault("users", [])
                 data.setdefault("groups", {})
+                data.setdefault("channels", {})
                 data.setdefault("emojis", ["😂", "🤣", "💩"])
                 data.setdefault("words", [])
                 data.setdefault("banned_links", [])
@@ -365,6 +481,12 @@ def user_contact_url(user):
     return f"tg://user?id={user.id}"
 
 
+def retry_wait_seconds(err):
+    """يحوّل قيمة retry_after (int أو timedelta حسب إصدار المكتبة) إلى ثوانٍ."""
+    wait = err.retry_after
+    return wait.total_seconds() if hasattr(wait, "total_seconds") else float(wait)
+
+
 async def safe_edit_text(message, text, reply_markup=None, parse_mode='Markdown'):
     """يحاول تعديل الرسالة بصيغة Markdown، وإذا فشل (لأي سبب) يعيد المحاولة كنص عادي بدل الفشل الصامت."""
     try:
@@ -522,7 +644,8 @@ def get_main_admin_keyboard():
     keyboard = [
         [InlineKeyboardButton("📢 إذاعة عامة للمجموعات", callback_data="bc_all"),
          InlineKeyboardButton("🎯 إذاعة مخصصة لمجموعة", callback_data="bc_single_select")],
-        [InlineKeyboardButton("👤 إذاعة للمستخدمين (خاص)", callback_data="bc_users")],
+        [InlineKeyboardButton("👤 إذاعة للمستخدمين (خاص)", callback_data="bc_users"),
+         InlineKeyboardButton("📡 إذاعة للقنوات", callback_data="bc_channels")],
         [InlineKeyboardButton("📊 الإحصائيات وسجل المجموعات", callback_data="show_stats")],
         [InlineKeyboardButton("🔇 إدارة الوضع الصامت", callback_data="manage_silent")],
         [InlineKeyboardButton("🆘 نداء الاستغاثة", callback_data="manage_rescue")],
@@ -574,6 +697,62 @@ def get_buttons_decision_keyboard():
         [InlineKeyboardButton("❌ إلغاء الإذاعة", callback_data="main_menu")]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+
+# ---------- الخطوة الأخيرة قبل الإذاعة: إرسال عادي أم إرسال مع تثبيت (ميزة جديدة) ----------
+def get_send_choice_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("📨 إرسال عادي", callback_data="bc_send_normal")],
+        [InlineKeyboardButton("📌 إرسال مع تثبيت الرسالة", callback_data="bc_send_pin")],
+        [InlineKeyboardButton("❌ إلغاء الإذاعة", callback_data="main_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_send_choice_text(bc_type):
+    if bc_type == "users":
+        pin_note = (
+            "📌 **مع التثبيت:** تُثبَّت الرسالة داخل محادثة كل مستخدم مع البوت "
+            "(قد يظهر للمستخدم إشعار «تم تثبيت رسالة»)."
+        )
+    elif bc_type == "channels":
+        pin_note = (
+            "📌 **مع التثبيت:** تُثبَّت الرسالة في كل قناة. يتطلب ذلك أن يملك البوت صلاحية "
+            "تعديل الرسائل في القناة، وإلا تُرسل الرسالة عادية ويظهر ذلك في التقرير."
+        )
+    else:
+        pin_note = (
+            "📌 **مع التثبيت:** تُثبَّت الرسالة في كل مجموعة. يتطلب ذلك أن يملك البوت صلاحية "
+            "«تثبيت الرسائل»، وإلا تُرسل الرسالة عادية ويظهر ذلك في التقرير."
+        )
+    return (
+        "📮 **الخطوة الأخيرة: كيف تريد إرسال الإذاعة؟**\n\n"
+        "📨 **إرسال عادي:** تصل الرسالة دون تثبيت.\n\n"
+        f"{pin_note}"
+    )
+
+
+async def show_send_choice(message, user_id, reply_markup, as_new=False):
+    """
+    يعرض سؤال «إرسال عادي / إرسال مع تثبيت» ويحفظ لوحة الأزرار (إن وُجدت) إلى حين الضغط.
+    as_new=True → يرسل السؤال كرسالة جديدة (بعد استلام تنسيق الأزرار)، وإلا يعدّل الرسالة الحالية.
+    """
+    data_bc = TEMP_BROADCAST.get(user_id)
+    if not data_bc:
+        text = "❌ حدث خطأ، أعد المحاولة من القائمة الرئيسية."
+        if as_new:
+            await message.reply_text(text, reply_markup=get_back_keyboard())
+        else:
+            await message.edit_text(text, reply_markup=get_back_keyboard())
+        return
+
+    data_bc["markup"] = reply_markup
+    WAITING_STATES[user_id] = "ask_send_choice"
+    text = get_send_choice_text(data_bc.get("type", ""))
+    if as_new:
+        await safe_reply_text(message, text, reply_markup=get_send_choice_keyboard())
+    else:
+        await safe_edit_text(message, text, reply_markup=get_send_choice_keyboard())
 
 
 def get_back_keyboard(target="main_menu"):
@@ -809,6 +988,7 @@ def build_stats_html(data):
         "📊 <b>الإحصائيات وسجل المجموعات</b>",
         "",
         f"• المجموعات النشطة: <b>{len(groups)}</b>",
+        f"• القنوات المسجّلة للإذاعة: <b>{len(data.get('channels', {}))}</b>",
         f"• مستخدمو البوت (الخاص): <b>{len(data.get('users', []))}</b>",
         f"• مشرفو البوت: <b>{len(data.get('admins', []))}</b>",
         f"• مجموعات الاشتراك الإجباري المفعّل: <b>{fs_active}</b>",
@@ -1001,6 +1181,10 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
                 }
                 data["removed_groups"].pop(gid, None)
                 save_data(data)
+            elif chat.type == "channel":
+                # تسجيل القناة ضمن قائمة وجهات «إذاعة للقنوات»
+                data.setdefault("channels", {})[gid] = title
+                save_data(data)
 
             bot_is_admin = new_cm.status == "administrator"
 
@@ -1033,7 +1217,11 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
         if was_in and not now_in:
             info = data["groups_info"].pop(gid, {})
             data["groups"].pop(gid, None)
+            data.setdefault("channels", {}).pop(gid, None)
             RESCUE_TRACK.pop(chat.id, None)
+            # سجل نشاط الأعضاء الخاص بهذه المجموعة لم يعد مطلوباً
+            if MEMBER_ACTIVITY.pop(gid, None) is not None:
+                ACTIVITY_STATE["dirty"] = True
 
             bot_left_by_self = actor.id == context.bot.id
             now_time = local_now_str()
@@ -1118,6 +1306,431 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
                 await notify_admins(context, text)
     except Exception:
         logging.exception("خطأ أثناء معالجة تغيّر حالة البوت داخل مجموعة/قناة")
+
+
+async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    يرصد انضمام الأعضاء ومغادرتهم لتحديث سجل التاغ الجماعي (يصل هذا التحديث فقط إن كان البوت مشرفاً).
+    الانضمام يسجّل العضو دون اعتباره نشاطاً كتابياً، والمغادرة تحذفه من السجل.
+    """
+    cm = update.chat_member
+    if not cm:
+        return
+    try:
+        chat = cm.chat
+        if chat.type not in ("group", "supergroup"):
+            return
+        was_in = _in_chat(cm.old_chat_member)
+        now_in = _in_chat(cm.new_chat_member)
+        member_user = cm.new_chat_member.user
+        if now_in and not was_in:
+            record_activity(chat.id, member_user, is_message=False)
+        elif was_in and not now_in:
+            forget_member(chat.id, member_user.id)
+    except Exception:
+        logging.exception("خطأ أثناء تحديث سجل الأعضاء")
+
+
+# === 4.6 التاغ الجماعي على دفعات (ميزة جديدة) ===
+async def fetch_group_admins(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """يجلب مشرفي المجموعة (غير البوتات) لتضمينهم في خيار «الجميع بدون استثناء»."""
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+        result = {}
+        for a in admins:
+            if getattr(a.user, "is_bot", False):
+                continue
+            result[str(a.user.id)] = (a.user.full_name or a.user.first_name or "عضو")[:40]
+        return result
+    except Exception:
+        return {}
+
+
+def select_tag_members(chat_id, days, admins_map):
+    """
+    يرجع قائمة (user_id, name) للأعضاء المراد منشنتهم، مرتبة من الأحدث نشاطاً إلى الأقدم.
+    days=None → الجميع (كل من رصدهم البوت + مشرفو المجموعة)، وإلا من كتب خلال آخر days يوماً.
+    """
+    grp = MEMBER_ACTIVITY.get(str(chat_id), {})
+    collected = {}
+    if days is None:
+        for uid, rec in grp.items():
+            collected[uid] = (rec.get("t", 0), rec.get("n") or "عضو")
+        for uid, name in (admins_map or {}).items():
+            collected.setdefault(uid, (0, name))
+    else:
+        cutoff = time.time() - days * 86400
+        for uid, rec in grp.items():
+            if rec.get("t", 0) >= cutoff:
+                collected[uid] = (rec.get("t", 0), rec.get("n") or "عضو")
+
+    ordered = sorted(collected.items(), key=lambda kv: kv[1][0], reverse=True)
+    result = []
+    for uid, (_, name) in ordered:
+        try:
+            result.append((int(uid), name))
+        except ValueError:
+            continue
+    return result
+
+
+def format_tag_duration(batches):
+    seconds = int(max(0, batches - 1) * TAG_BATCH_DELAY)
+    if seconds < 60:
+        return f"حوالي {max(seconds, 1)} ثانية"
+    return f"حوالي {math.ceil(seconds / 60)} دقيقة"
+
+
+def build_tag_menu_text(custom_text):
+    return (
+        "🏷️ <b>التاغ الجماعي</b>\n\n"
+        f"📝 <b>الرسالة المرفقة مع كل دفعة:</b>\n{h(custom_text)}\n\n"
+        "اختر فئة الأعضاء المراد منشنتهم حسب <b>آخر رسالة كتبوها</b> في المجموعة "
+        f"(الرقم بين القوسين = عدد الأعضاء). يُمنشَن <b>{TAG_BATCH_SIZE}</b> أعضاء في كل رسالة.\n\n"
+        "ℹ️ <i>تيليجرام لا تتيح للبوتات جلب قائمة الأعضاء كاملة، لذلك يشمل التاغ الأعضاء "
+        "الذين رصدهم البوت داخل المجموعة.</i>"
+    )
+
+
+def get_tag_menu_keyboard(chat_id, admins_map):
+    rows = []
+    pair = []
+    for key, days, label in TAG_PERIODS:
+        count = len(select_tag_members(chat_id, days, admins_map))
+        pair.append(InlineKeyboardButton(f"{label} ({count})", callback_data=f"tag_pick_{key}"))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    all_count = len(select_tag_members(chat_id, None, admins_map))
+    rows.append([InlineKeyboardButton(f"👥 الجميع بدون استثناء ({all_count})", callback_data="tag_pick_all")])
+    rows.append([InlineKeyboardButton("❌ إغلاق", callback_data="tag_close")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_tag_confirm_text(period_key, members_count, custom_text):
+    batches = math.ceil(members_count / TAG_BATCH_SIZE)
+    return (
+        "🏷️ <b>تأكيد التاغ الجماعي</b>\n\n"
+        f"📌 <b>الفئة:</b> {h(TAG_PERIOD_LABELS[period_key])}\n"
+        f"👥 <b>عدد الأعضاء:</b> {members_count}\n"
+        f"📦 <b>عدد الرسائل:</b> {batches} (كل رسالة {TAG_BATCH_SIZE} أعضاء)\n"
+        f"⏱️ <b>المدة التقريبية:</b> {format_tag_duration(batches)}\n\n"
+        f"📝 <b>الرسالة:</b>\n{h(custom_text)}\n\n"
+        "يمكن إيقاف العملية في أي لحظة بزر «🛑 إلغاء التاغ» الظاهر أسفل آخر دفعة."
+    )
+
+
+def get_tag_confirm_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚀 ابدأ التاغ", callback_data="tag_go")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="tag_back"),
+         InlineKeyboardButton("❌ إغلاق", callback_data="tag_close")]
+    ])
+
+
+async def _edit_html(message, text, reply_markup=None):
+    try:
+        await message.edit_text(text, parse_mode='HTML', reply_markup=reply_markup, disable_web_page_preview=True)
+    except Exception:
+        # غالباً «message is not modified»؛ لا حاجة لأي إجراء
+        pass
+
+
+async def tag_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    أمر التاغ داخل المجموعة: /تاغ [نص الرسالة]  أو  /tag [نص]  أو كلمة «تاغ» وحدها.
+    إن أُرسل بالرد على رسالة بدون نص، يُستخدم نص الرسالة المردود عليها كرسالة مرفقة بكل دفعة.
+    ينفّذه فقط مشرفو البوت ومشرفو المجموعة (يتجاهل غيرهم بصمت).
+    """
+    msg = update.message
+    if not msg or not msg.text or not update.effective_chat:
+        return
+
+    chat = update.effective_chat
+    chat_id = chat.id
+    if chat.type not in ("group", "supergroup"):
+        return
+
+    parts = msg.text.strip().split(None, 1)
+    first_token = parts[0]
+    # إن كان الأمر موجهاً لبوت آخر (/tag@OtherBot) نتجاهله
+    if "@" in first_token:
+        addressed = first_token.split("@", 1)[1].lower()
+        if addressed != (context.bot.username or "").lower():
+            return
+
+    user = update.effective_user
+    is_anonymous_admin = bool(msg.sender_chat and msg.sender_chat.id == chat_id)
+    allowed = is_anonymous_admin or bool(user and await is_group_admin(context, chat_id, user.id))
+    if not allowed:
+        return
+
+    if chat_id in TAG_JOBS:
+        try:
+            warn = await context.bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ هناك عملية تاغ جارية حالياً في هذه المجموعة. أوقفها بزر «🛑 إلغاء التاغ» أو انتظر اكتمالها."
+            )
+            asyncio.create_task(delete_after_delay(warn, 8))
+        except Exception:
+            pass
+        return
+
+    custom = parts[1].strip() if len(parts) > 1 else ""
+    if not custom and msg.reply_to_message:
+        custom = (msg.reply_to_message.text or msg.reply_to_message.caption or "").strip()
+    custom = custom[:TAG_MESSAGE_MAX_LEN].strip() or DEFAULT_TAG_MESSAGE
+
+    admins_map = await fetch_group_admins(context, chat_id)
+
+    # تنظيف قوائم الاختيار المنتهية
+    now_ts = time.time()
+    for k in [k for k, v in TAG_PENDING.items() if now_ts - v.get("created", 0) > TAG_PENDING_TTL]:
+        TAG_PENDING.pop(k, None)
+
+    try:
+        menu = await context.bot.send_message(
+            chat_id=chat_id,
+            text=build_tag_menu_text(custom),
+            parse_mode='HTML',
+            reply_markup=get_tag_menu_keyboard(chat_id, admins_map),
+            disable_web_page_preview=True
+        )
+    except Exception:
+        logging.exception("فشل إرسال قائمة التاغ")
+        return
+
+    TAG_PENDING[(chat_id, menu.message_id)] = {
+        "text": custom,
+        "admins": admins_map,
+        "period": None,
+        "created": now_ts
+    }
+
+    # نحذف رسالة الأمر للحفاظ على نظافة المجموعة (إن كانت الصلاحية متاحة)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+
+async def tag_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أزرار التاغ الجماعي (القائمة + التأكيد + الإلغاء): متاحة فقط لمشرفي البوت ومشرفي المجموعة."""
+    query = update.callback_query
+    data = query.data or ""
+    message = query.message
+    if not message or message.chat.type == "private":
+        await query.answer()
+        return
+
+    chat_id = message.chat.id
+    user_id = query.from_user.id
+
+    if not await is_group_admin(context, chat_id, user_id):
+        await query.answer("❌ هذا الزر مخصص لمشرفي البوت ومشرفي المجموعة فقط.", show_alert=True)
+        return
+
+    # ---------- زر إلغاء التاغ ----------
+    if data.startswith("tag_stop_"):
+        try:
+            job_id = int(data.replace("tag_stop_", ""))
+        except ValueError:
+            job_id = -1
+        job = TAG_JOBS.get(chat_id)
+        if not job or job["id"] != job_id:
+            await query.answer("ℹ️ انتهت عملية التاغ بالفعل أو لم تعد نشطة.", show_alert=True)
+            try:
+                await message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+        job["cancelled"] = True
+        job["cancelled_by"] = query.from_user.full_name or query.from_user.first_name or "مشرف"
+        job["cancelled_by_id"] = user_id
+        await query.answer("🛑 تم إلغاء التاغ.")
+        try:
+            await message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+
+    key = (chat_id, message.message_id)
+
+    if data == "tag_close":
+        TAG_PENDING.pop(key, None)
+        await query.answer()
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    pending = TAG_PENDING.get(key)
+    if not pending or time.time() - pending.get("created", 0) > TAG_PENDING_TTL:
+        TAG_PENDING.pop(key, None)
+        await query.answer("⌛ انتهت صلاحية هذه القائمة، أعد كتابة أمر التاغ.", show_alert=True)
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    if data == "tag_back":
+        pending["period"] = None
+        await query.answer()
+        await _edit_html(
+            message,
+            build_tag_menu_text(pending["text"]),
+            get_tag_menu_keyboard(chat_id, pending["admins"])
+        )
+        return
+
+    if data.startswith("tag_pick_"):
+        period_key = data.replace("tag_pick_", "")
+        if period_key not in TAG_PERIOD_DAYS:
+            await query.answer()
+            return
+        members = select_tag_members(chat_id, TAG_PERIOD_DAYS[period_key], pending["admins"])
+        if not members:
+            await query.answer("ℹ️ لا يوجد أعضاء مسجّلون ضمن هذه الفئة بعد.", show_alert=True)
+            return
+        pending["period"] = period_key
+        await query.answer()
+        await _edit_html(
+            message,
+            build_tag_confirm_text(period_key, len(members), pending["text"]),
+            get_tag_confirm_keyboard()
+        )
+        return
+
+    if data == "tag_go":
+        period_key = pending.get("period")
+        if period_key not in TAG_PERIOD_DAYS:
+            await query.answer("ℹ️ اختر الفئة أولاً.", show_alert=True)
+            return
+        if chat_id in TAG_JOBS:
+            await query.answer("⚠️ هناك عملية تاغ جارية بالفعل.", show_alert=True)
+            return
+        members = select_tag_members(chat_id, TAG_PERIOD_DAYS[period_key], pending["admins"])
+        if not members:
+            await query.answer("ℹ️ لا يوجد أعضاء ضمن هذه الفئة.", show_alert=True)
+            return
+
+        TAG_PENDING.pop(key, None)
+        TAG_JOB_SEQ["n"] += 1
+        job = {
+            "id": TAG_JOB_SEQ["n"],
+            "cancelled": False,
+            "cancelled_by": None,
+            "cancelled_by_id": None
+        }
+        TAG_JOBS[chat_id] = job
+        await query.answer("🚀 بدأ التاغ الجماعي")
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        task = asyncio.create_task(run_tag_job(context, chat_id, job, members, pending["text"]))
+        BACKGROUND_TASKS.add(task)
+        task.add_done_callback(BACKGROUND_TASKS.discard)
+        return
+
+    await query.answer()
+
+
+async def run_tag_job(context: ContextTypes.DEFAULT_TYPE, chat_id: int, job, members, custom_text):
+    """
+    ينفّذ التاغ على دفعات (10 أعضاء لكل رسالة). كل دفعة تحمل الرسالة المرفقة وزر «إلغاء التاغ»؛
+    وعند إرسال الدفعة التالية يُزال الزر من السابقة بحيث يبقى زر واحد ظاهر أسفل آخر دفعة.
+    """
+    batches = [members[i:i + TAG_BATCH_SIZE] for i in range(0, len(members), TAG_BATCH_SIZE)]
+    total_batches = len(batches)
+    header = h(custom_text)
+    prev_msg_id = None
+    tagged = 0
+    failed = False
+
+    cancel_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛑 إلغاء التاغ", callback_data=f"tag_stop_{job['id']}")]
+    ])
+
+    try:
+        for idx, batch in enumerate(batches, 1):
+            if job["cancelled"]:
+                break
+
+            lines = "\n".join(f"• {user_mention_html(uid, name)}" for uid, name in batch)
+            body = (
+                f"📢 <b>{header}</b>\n\n"
+                f"{lines}\n\n"
+                f"<i>📦 الدفعة {idx} من {total_batches}</i>"
+            )
+
+            sent = None
+            for _ in range(3):
+                try:
+                    sent = await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=body,
+                        parse_mode='HTML',
+                        reply_markup=cancel_kb,
+                        disable_web_page_preview=True
+                    )
+                    break
+                except RetryAfter as e:
+                    await asyncio.sleep(retry_wait_seconds(e) + 1)
+
+            if sent is None:
+                failed = True
+                break
+
+            tagged += len(batch)
+
+            # إزالة زر الإلغاء من الدفعة السابقة (يبقى الزر فقط تحت آخر دفعة)
+            if prev_msg_id:
+                try:
+                    await context.bot.edit_message_reply_markup(chat_id=chat_id, message_id=prev_msg_id, reply_markup=None)
+                except Exception:
+                    pass
+            prev_msg_id = sent.message_id
+
+            if idx < total_batches:
+                # انتظار موزّع على خطوات صغيرة ليُلاحَظ الإلغاء بسرعة
+                waited = 0.0
+                while waited < TAG_BATCH_DELAY and not job["cancelled"]:
+                    await asyncio.sleep(0.5)
+                    waited += 0.5
+    except Exception:
+        failed = True
+        logging.exception("خطأ أثناء تنفيذ التاغ الجماعي")
+    finally:
+        TAG_JOBS.pop(chat_id, None)
+
+    # إزالة زر الإلغاء من آخر دفعة
+    if prev_msg_id:
+        try:
+            await context.bot.edit_message_reply_markup(chat_id=chat_id, message_id=prev_msg_id, reply_markup=None)
+        except Exception:
+            pass
+
+    if job["cancelled"]:
+        who = user_mention_html(job.get("cancelled_by_id") or 0, job.get("cancelled_by") or "مشرف")
+        summary = f"🛑 تم إلغاء التاغ الجماعي بواسطة {who}.\n👥 تم منشن {tagged} من أصل {len(members)} عضواً."
+    elif failed:
+        summary = (
+            f"⚠️ توقف التاغ الجماعي بسبب خطأ في الإرسال.\n👥 تم منشن {tagged} من أصل {len(members)} عضواً."
+        )
+    else:
+        summary = f"✅ اكتمل التاغ الجماعي.\n👥 تم منشن {tagged} عضواً في {total_batches} رسالة."
+
+    try:
+        notice = await context.bot.send_message(chat_id=chat_id, text=summary, parse_mode='HTML')
+        asyncio.create_task(delete_after_delay(notice, 30))
+    except Exception:
+        pass
 
 
 # === 5. التحكم في الأزرار ===
@@ -1217,6 +1830,14 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• الحد الأقصى: {PURGE_MAX_COUNT} رسالة في الأمر الواحد.\n"
             "• شرط التنفيذ: أن يكون المنفّذ مشرفاً في البوت **ومشرفاً في المجموعة** معاً.\n"
             "• يمكنك إضافة أوامر مسح أخرى من زر «🧹 أوامر مسح الرسائل».\n\n"
+            "🏷️ **التاغ الجماعي (داخل المجموعة):**\n"
+            "• `/تاغ نص الرسالة` أو `/tag نص الرسالة` : تظهر قائمة لاختيار الفئة "
+            "(آخر 7 / 20 / 30 / 60 يوماً أو الجميع).\n"
+            "• يمكنك كتابة `/تاغ` بالرد على رسالة ليُستخدم نصها كرسالة مرفقة بكل دفعة، "
+            "أو كتابة كلمة «تاغ» وحدها لاستخدام الرسالة الافتراضية.\n"
+            f"• يُمنشَن {TAG_BATCH_SIZE} أعضاء في كل رسالة، ويظهر زر «🛑 إلغاء التاغ» لمشرفي البوت والمجموعة فقط.\n"
+            "• يعتمد التاغ على الأعضاء الذين رصدهم البوت (آخر رسالة كتبوها)، فيبدأ الرصد من لحظة تشغيل هذه الميزة.\n\n"
+            "📣 **تثبيت الإذاعة:** في آخر خطوة قبل الإرسال تختار بين «إرسال عادي» و«إرسال مع تثبيت».\n\n"
             "🆘 **نداء الاستغاثة:** إذا كتب الأعضاء كلمة النداء المحددة عدداً من المرات المتتالية "
             "داخل المجموعة المستهدفة، يتم تفعيل الوضع الصامت تلقائياً."
         )
@@ -1646,6 +2267,21 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         WAITING_STATES[user_id] = "bc_msg_users"
         await query.message.edit_text("📝 **أرسل الآن منشور الإذاعة الخاص للمستخدمين:**", reply_markup=get_back_keyboard())
 
+    elif action == "bc_channels":
+        if not bot_data.get("channels"):
+            await query.message.edit_text(
+                "❌ لا توجد قنوات مسجلة للإذاعة بعد.\n\n"
+                "أضف البوت كمشرف في القناة (مع صلاحية نشر الرسائل)، أو اربط القناة عبر "
+                "«📢 الاشتراك الإجباري» ليتم تسجيلها تلقائياً، ثم أعد المحاولة.",
+                reply_markup=get_back_keyboard()
+            )
+            return
+        WAITING_STATES[user_id] = "bc_msg_channels"
+        await query.message.edit_text(
+            f"📝 **أرسل الآن منشور الإذاعة للقنوات ({len(bot_data.get('channels', {}))} قناة مسجلة):**",
+            reply_markup=get_back_keyboard()
+        )
+
     elif action == "bc_single_select":
         groups = bot_data.get("groups", {})
         if not groups:
@@ -1676,7 +2312,13 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(guide, parse_mode='Markdown', reply_markup=get_back_keyboard())
 
     elif action == "btn_add_no":
-        await execute_broadcast(context, user_id, query.message, None)
+        # الإرسال بدون أزرار: ننتقل أولاً لسؤال «إرسال عادي / إرسال مع تثبيت»
+        await show_send_choice(query.message, user_id, None)
+
+    elif action in ("bc_send_normal", "bc_send_pin"):
+        data_bc = TEMP_BROADCAST.get(user_id)
+        stored_markup = data_bc.get("markup") if data_bc else None
+        await execute_broadcast(context, user_id, query.message, stored_markup, pin=(action == "bc_send_pin"))
 
     elif action == "add_admin":
         WAITING_STATES[user_id] = "add_admin"
@@ -1760,7 +2402,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text("✅ تم تحديث إعداد حظر الملصقات المتحركة و GIF.", reply_markup=get_stickers_keyboard(bot_data))
 
 
-# === 6. تنفيذ عملية الإذاعة (محسّنة: إرسال متزامن + تنظيف الوجهات الميتة + تقرير مفصل) ===
+# === 6. تنفيذ عملية الإذاعة (محسّنة: إرسال متزامن + تنظيف الوجهات الميتة + تقرير مفصل + تثبيت اختياري) ===
 def _classify_send_error(err):
     """يصنّف خطأ الإرسال: dead = الوجهة لم تعد صالحة (طُرد البوت/حُذفت المجموعة/حُظر البوت)."""
     msg = str(err).lower()
@@ -1770,21 +2412,28 @@ def _classify_send_error(err):
     return "fail"
 
 
-async def execute_broadcast(context: ContextTypes.DEFAULT_TYPE, user_id: int, status_msg, reply_markup):
+async def execute_broadcast(context: ContextTypes.DEFAULT_TYPE, user_id: int, status_msg, reply_markup, pin=False):
     data_bc = TEMP_BROADCAST.get(user_id)
     if not data_bc:
         await status_msg.edit_text("❌ حدث خطأ، أعد المحاولة.", reply_markup=get_back_keyboard())
         return
 
+    # حماية من الضغط المزدوج على زر الإرسال (حتى لا تُرسل الإذاعة مرتين)
+    if data_bc.get("sending"):
+        return
+    data_bc["sending"] = True
+
     bc_type = data_bc["type"]
     msg_to_copy = data_bc["msg"]
     bot_data = load_data()
 
-    await status_msg.edit_text("⏳ جاري الإذاعة...")
+    await status_msg.edit_text("⏳ جاري الإذاعة مع التثبيت 📌..." if pin else "⏳ جاري الإذاعة...")
 
     targets = []
     if bc_type == "all":
         targets = list(bot_data.get("groups", {}).keys())
+    elif bc_type == "channels":
+        targets = list(bot_data.get("channels", {}).keys())
     elif bc_type == "users":
         targets = list(bot_data.get("users", []))
     elif bc_type.startswith("single_"):
@@ -1793,28 +2442,45 @@ async def execute_broadcast(context: ContextTypes.DEFAULT_TYPE, user_id: int, st
     sem = asyncio.Semaphore(15)
 
     async def send_one(target_id):
+        """يعيد (الوجهة، حالة الإرسال ok/fail/dead، حالة التثبيت None/pinned/pin_fail)."""
         async with sem:
+            sent_msg = None
             for _ in range(2):
                 try:
-                    await msg_to_copy.copy(chat_id=int(target_id), reply_markup=reply_markup)
-                    return target_id, "ok"
+                    sent_msg = await msg_to_copy.copy(chat_id=int(target_id), reply_markup=reply_markup)
+                    break
                 except RetryAfter as e:
-                    wait = e.retry_after
-                    wait = wait.total_seconds() if hasattr(wait, "total_seconds") else float(wait)
-                    await asyncio.sleep(wait + 1)
+                    await asyncio.sleep(retry_wait_seconds(e) + 1)
                 except (Forbidden, BadRequest) as e:
-                    return target_id, _classify_send_error(e)
+                    return target_id, _classify_send_error(e), None
                 except Exception:
-                    return target_id, "fail"
-            return target_id, "fail"
+                    return target_id, "fail", None
+
+            if sent_msg is None:
+                return target_id, "fail", None
+
+            pin_state = None
+            if pin:
+                # فشل التثبيت لا يُلغي نجاح الإرسال؛ يُسجَّل فقط في التقرير
+                pin_state = "pin_fail"
+                for _ in range(2):
+                    try:
+                        await context.bot.pin_chat_message(chat_id=int(target_id), message_id=sent_msg.message_id)
+                        pin_state = "pinned"
+                        break
+                    except RetryAfter as e:
+                        await asyncio.sleep(retry_wait_seconds(e) + 1)
+                    except Exception:
+                        break
+            return target_id, "ok", pin_state
 
     results = await asyncio.gather(*[send_one(t) for t in targets]) if targets else []
 
-    sent = sum(1 for _, r in results if r == "ok")
-    failed_ids = [t for t, r in results if r != "ok"]
-    dead_ids = [t for t, r in results if r == "dead"]
+    sent = sum(1 for _, r, _p in results if r == "ok")
+    failed_ids = [t for t, r, _p in results if r != "ok"]
+    dead_ids = [t for t, r, _p in results if r == "dead"]
 
-    # تنظيف الوجهات الميتة تلقائياً (مجموعات طُرد منها البوت / مستخدمون حظروا البوت)
+    # تنظيف الوجهات الميتة تلقائياً (مجموعات/قنوات طُرد منها البوت / مستخدمون حظروا البوت)
     removed_count = 0
     if dead_ids:
         if bc_type == "users":
@@ -1826,24 +2492,56 @@ async def execute_broadcast(context: ContextTypes.DEFAULT_TYPE, user_id: int, st
                     pass
         else:
             for t in dead_ids:
-                if bot_data["groups"].pop(str(t), None) is not None:
+                removed_group = bot_data["groups"].pop(str(t), None)
+                removed_channel = bot_data.setdefault("channels", {}).pop(str(t), None)
+                if removed_group is not None or removed_channel is not None:
                     removed_count += 1
         save_data(bot_data)
 
     TEMP_BROADCAST.pop(user_id, None)
     WAITING_STATES[user_id] = None
 
+    def dest_name(t):
+        return (
+            bot_data.get("groups", {}).get(str(t))
+            or bot_data.get("channels", {}).get(str(t))
+            or str(t)
+        )
+
     report = f"✅ تمت الإذاعة!\n- نجاح: {sent}\n- فشل: {len(failed_ids)}"
+
+    if pin:
+        pinned_count = sum(1 for _, r, p in results if p == "pinned")
+        pin_failed_ids = [t for t, r, p in results if p == "pin_fail"]
+        report += f"\n- 📌 تم التثبيت: {pinned_count}"
+        if pin_failed_ids:
+            report += f"\n- ⚠️ تعذّر التثبيت: {len(pin_failed_ids)} (أُرسلت الرسالة دون تثبيت)"
+
     if removed_count:
-        label = "مستخدم حظر البوت" if bc_type == "users" else "مجموعة لم يعد البوت فيها"
+        if bc_type == "users":
+            label = "مستخدم حظر البوت"
+        elif bc_type == "channels":
+            label = "قناة لم يعد البوت فيها"
+        else:
+            label = "مجموعة لم يعد البوت فيها"
         report += f"\n- 🧹 تمت إزالة {removed_count} ({label}) من القائمة تلقائياً"
+
     if failed_ids and bc_type != "users":
-        names = []
-        for t in failed_ids[:10]:
-            names.append(bot_data.get("groups", {}).get(str(t)) or str(t))
+        names = [dest_name(t) for t in failed_ids[:10]]
         report += "\n\n⚠️ وجهات فشل الإرسال إليها:\n" + "\n".join(f"• {n}" for n in names)
         if len(failed_ids) > 10:
             report += f"\n… و {len(failed_ids) - 10} أخرى"
+
+    if pin and bc_type != "users":
+        pin_failed_ids = [t for t, r, p in results if p == "pin_fail"]
+        if pin_failed_ids:
+            names = [dest_name(t) for t in pin_failed_ids[:10]]
+            report += (
+                "\n\n📌 وجهات تعذّر التثبيت فيها (تأكد من صلاحية تثبيت الرسائل للبوت):\n"
+                + "\n".join(f"• {n}" for n in names)
+            )
+            if len(pin_failed_ids) > 10:
+                report += f"\n… و {len(pin_failed_ids) - 10} أخرى"
 
     await status_msg.edit_text(report, reply_markup=get_back_keyboard())
 
@@ -1876,12 +2574,12 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("🔗 **هل ترغب بإضافة أزرار روابط للمنشور؟**", reply_markup=get_buttons_decision_keyboard())
 
     elif state == "wait_for_btn_format":
-        btn_markup = parse_button_markup(update.message.text)
+        btn_markup = parse_button_markup(update.message.text or "")
         if not btn_markup:
             await update.message.reply_text("❌ التنسيق غير صحيح! التأكد من إرسال رابط صحيح (https://...)\nحاول مرة أخرى:")
             return
-        status_msg = await update.message.reply_text("⏳ جاري تحضير الإذاعة...")
-        await execute_broadcast(context, user_id, status_msg, btn_markup)
+        # بعد قبول الأزرار ننتقل لسؤال «إرسال عادي / إرسال مع تثبيت» قبل التنفيذ الفعلي
+        await show_send_choice(update.message, user_id, btn_markup, as_new=True)
 
     elif state == "set_schedule":
         WAITING_STATES[user_id] = None
@@ -2109,6 +2807,8 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 "created_at": existing.get("created_at", now_str) if existing else now_str,
                 "updated_at": now_str
             }
+            # القناة التي تأكدنا أن البوت مشرف فيها تُسجَّل أيضاً ضمن وجهات «إذاعة للقنوات»
+            bot_data.setdefault("channels", {})[str(channel_chat.id)] = channel_chat.title or "قناة بدون اسم"
             save_data(bot_data)
 
             await safe_reply_text(
@@ -2574,6 +3274,19 @@ async def group_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg.is_automatic_forward:
         return
 
+    # رصد نشاط الأعضاء لميزة التاغ الجماعي (آخر رسالة لكل عضو + الانضمام/المغادرة).
+    # يتم قبل أي فلتر حتى تُحتسب رسائل الأعضاء حتى لو حذفها البوت، ولا يؤثر على سير الفلاتر.
+    try:
+        if msg.new_chat_members:
+            for new_member in msg.new_chat_members:
+                record_activity(chat_id, new_member, is_message=False)
+        elif msg.left_chat_member:
+            forget_member(chat_id, msg.left_chat_member.id)
+        elif update.effective_user and not msg.sender_chat:
+            record_activity(chat_id, update.effective_user, is_message=True)
+    except Exception:
+        logging.exception("خطأ أثناء رصد نشاط الأعضاء")
+
     # منع الهمسات: يُفحص قبل أي استثناء لأنه يشمل المشرفين أيضاً (حتى الأدمن المتخفي)
     if getattr(msg, "via_bot", None):
         if await handle_whisper_block(update, context, msg, chat_id):
@@ -2734,10 +3447,16 @@ async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
+
+    # أزرار التاغ الجماعي (يجب تسجيلها قبل المعالج العام للأزرار)
+    app.add_handler(CallbackQueryHandler(tag_callback, pattern=r"^tag_"))
     app.add_handler(CallbackQueryHandler(button_click))
 
     # تتبع إضافة/إخراج/ترقية البوت داخل المجموعات والقنوات (ميزة جديدة)
     app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+
+    # رصد انضمام/مغادرة الأعضاء لتحديث سجل التاغ الجماعي (يتطلب أن يكون البوت مشرفاً)
+    app.add_handler(ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
 
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND), handle_private_message))
 
@@ -2745,14 +3464,26 @@ async def main():
 
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, group_filter))
 
+    # أمر التاغ الجماعي: في مجموعة معالجات مستقلة (group=1) حتى لا يتعارض مع فلاتر الحماية في group_filter
+    app.add_handler(
+        MessageHandler(filters.ChatType.GROUPS & filters.Regex(TAG_CMD_REGEX), tag_command_handler),
+        group=1
+    )
+
     app.add_error_handler(global_error_handler)
 
     print("البوت يعمل بنجاح...")
     await app.initialize()
     await app.start()
+
+    # حفظ سجل نشاط الأعضاء دورياً في الخلفية
+    flush_task = asyncio.create_task(activity_flush_loop())
+    BACKGROUND_TASKS.add(flush_task)
+    flush_task.add_done_callback(BACKGROUND_TASKS.discard)
+
     await app.updater.start_polling(
         drop_pending_updates=True,
-        allowed_updates=["message", "callback_query", "my_chat_member"]
+        allowed_updates=["message", "callback_query", "my_chat_member", "chat_member"]
     )
     await asyncio.Event().wait()
 
