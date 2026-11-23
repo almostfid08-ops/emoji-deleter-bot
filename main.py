@@ -58,6 +58,10 @@ TAG_JOBS = {}
 TAG_PENDING = {}
 # عدّاد معرّفات عمليات التاغ (لمنع تأثير أزرار قديمة على عملية جديدة)
 TAG_JOB_SEQ = {"n": 0}
+# مشرفون ناداوا البوت وننتظر منهم كتابة رسالة التاغ: {(chat_id, user_id): {...}}
+TAG_AWAIT = {}
+# ذاكرة مؤقتة لإعدادات النداء حتى لا نقرأ الملف مع كل رسالة في المجموعة
+TAG_CFG_CACHE = {"mtime": None, "calls": None, "require_mention": False}
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -179,8 +183,10 @@ TAG_PERIOD_LABELS = {
     "all": "الجميع بدون استثناء",
 }
 
-# أوامر التاغ داخل المجموعة: /تاغ  /tag  /tagall  /منشن  أو كلمة «تاغ» / «منشن» وحدها
-TAG_CMD_REGEX = r"^(?:/(?:tagall|tag|تاغ|منشن)(?:@\w+)?(?:\s|$)|(?:تاغ|منشن)\s*$)"
+# كلمات نداء التاغ الافتراضية (يمكن تغييرها من لوحة المشرفين ← إعدادات منادات التاغ)
+DEFAULT_TAG_CALLS = ["طاق", "تاغ", "منشن"]
+# مدة انتظار كتابة المشرف لرسالة التاغ بعد ندائه للبوت (ثوانٍ)
+TAG_AWAIT_TTL = 120
 
 # === نصوص ثابتة ===
 DEVELOPER_USERNAME = "@Nabil1r"
@@ -231,6 +237,9 @@ def default_data():
         "groups": {},
         # القنوات المسجّلة للإذاعة (المفتاح = معرّف القناة كنص)
         "channels": {},
+        # كلمات نداء التاغ (قابلة للتغيير من لوحة المشرفين) + اشتراط منشن البوت قبل الكلمة
+        "tag_calls": list(DEFAULT_TAG_CALLS),
+        "tag_require_mention": False,
         "users": [],
         "admins": list(INITIAL_ADMINS),
         "emojis": ["😂", "🤣", "💩"],
@@ -285,6 +294,8 @@ def load_data():
                 data.setdefault("users", [])
                 data.setdefault("groups", {})
                 data.setdefault("channels", {})
+                data.setdefault("tag_calls", list(DEFAULT_TAG_CALLS))
+                data.setdefault("tag_require_mention", False)
                 data.setdefault("emojis", ["😂", "🤣", "💩"])
                 data.setdefault("words", [])
                 data.setdefault("banned_links", [])
@@ -651,6 +662,7 @@ def get_main_admin_keyboard():
         [InlineKeyboardButton("🆘 نداء الاستغاثة", callback_data="manage_rescue")],
         [InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="manage_force_sub")],
         [InlineKeyboardButton("🧹 أوامر مسح الرسائل", callback_data="manage_purge")],
+        [InlineKeyboardButton("🏷️ إعدادات منادات التاغ", callback_data="manage_tag_calls")],
         [InlineKeyboardButton("⚙️ الإشعارات والحماية المتقدمة", callback_data="manage_settings")],
         [InlineKeyboardButton("📖 دليل أوامر الإشراف", callback_data="show_cmd_help")],
         [InlineKeyboardButton("👤 إضافة مشرف جديد", callback_data="add_admin")],
@@ -1331,6 +1343,130 @@ async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAUL
         logging.exception("خطأ أثناء تحديث سجل الأعضاء")
 
 
+# === 4.55 منادات التاغ: كلمات النداء وإعداداتها (ميزة جديدة) ===
+def get_tag_calls(data):
+    """قائمة كلمات نداء التاغ الحالية (أو الافتراضية إن كانت فارغة/تالفة)."""
+    calls = data.get("tag_calls")
+    if not isinstance(calls, list) or not calls:
+        return list(DEFAULT_TAG_CALLS)
+    return [c for c in calls if isinstance(c, str) and c.strip()]
+
+
+def clean_tag_call(raw):
+    """يتحقق من كلمة نداء جديدة ويعيدها منظّفة، أو None إن كانت غير صالحة."""
+    cmd = normalize_text_spaces(raw)
+    if not cmd or len(cmd) > 20:
+        return None
+    if cmd.startswith("/") or cmd.startswith("@") or cmd.isdigit():
+        return None
+    if re.search(r"[`*_\[\]<>]", cmd):
+        return None
+    return cmd
+
+
+def invalidate_tag_cfg():
+    TAG_CFG_CACHE["mtime"] = None
+
+
+def get_tag_config():
+    """يعيد (كلمات النداء، هل يُشترط منشن البوت) مع ذاكرة مؤقتة تتجدد عند تغيّر ملف البيانات."""
+    try:
+        mtime = os.path.getmtime(DATA_FILE)
+    except OSError:
+        mtime = None
+    if mtime is None or mtime != TAG_CFG_CACHE["mtime"] or TAG_CFG_CACHE["calls"] is None:
+        data = load_data()
+        TAG_CFG_CACHE["calls"] = get_tag_calls(data)
+        TAG_CFG_CACHE["require_mention"] = bool(data.get("tag_require_mention", False))
+        TAG_CFG_CACHE["mtime"] = mtime
+    return TAG_CFG_CACHE["calls"], TAG_CFG_CACHE["require_mention"]
+
+
+def match_tag_trigger(text, bot_username, calls, require_mention):
+    """
+    يفحص هل النص نداء للتاغ. يعيد None إن لم يكن نداءً، وإلا نص الرسالة المرفق بعد الكلمة (قد يكون "").
+    الصيغ المقبولة (كلمة النداء = أي كلمة من القائمة، وتُغيَّر من اللوحة):
+      • @يوزر_البوت كلمة_النداء [نص]
+      • /كلمة_النداء[@البوت] [نص]
+      • كلمة_النداء وحدها (إلا إذا فُعّل اشتراط منشن البوت)
+      • الأوامر الثابتة: /tag  /tagall  /تاغ  /منشن
+    """
+    if not text:
+        return None
+    clean = text.strip()
+    uname = (bot_username or "").lower()
+    flags = re.IGNORECASE | re.DOTALL
+
+    m = re.match(r"^/(?:tagall|tag|تاغ|منشن)(?:@(\w+))?(?:\s+(.*))?$", clean, flags)
+    if m:
+        addressed = (m.group(1) or "").lower()
+        if addressed and addressed != uname:
+            return None
+        return (m.group(2) or "").strip()
+
+    names = sorted({normalize_text_spaces(c) for c in calls if c and c.strip()}, key=len, reverse=True)
+    for name in names:
+        n = re.escape(name)
+        m = re.match(r"^/" + n + r"(?:@(\w+))?(?:\s+(.*))?$", clean, flags)
+        if m:
+            addressed = (m.group(1) or "").lower()
+            if addressed and addressed != uname:
+                continue
+            return (m.group(2) or "").strip()
+        if uname:
+            m = re.match(r"^@" + re.escape(uname) + r"\s+" + n + r"(?:\s+(.*))?$", clean, flags)
+            if m:
+                return (m.group(1) or "").strip()
+        if not require_mention and re.match(r"^" + n + r"$", clean, flags):
+            return ""
+    return None
+
+
+def get_tag_calls_text(data, bot_username):
+    calls = get_tag_calls(data)
+    uname = bot_username or "BotUsername"
+    example = calls[0]
+    calls_text = "\n".join(f"• `{c}`" for c in calls)
+    mention_status = "مفعّل 🟢" if data.get("tag_require_mention") else "معطّل 🔴"
+    return (
+        "🏷️ **إعدادات منادات التاغ**\n\n"
+        "يستطيع أي مشرف (في البوت أو في المجموعة) مناداة البوت داخل المجموعة ليبدأ التاغ الجماعي "
+        "بإحدى الصيغ التالية (مثال بالكلمة الأولى):\n\n"
+        f"• `@{uname} {example}` : منشن يوزر البوت ثم كلمة النداء.\n"
+        f"• `/{example}` : كلمة النداء بعد شرطة مائلة.\n"
+        f"• `{example}` : كلمة النداء وحدها (تُعطَّل باشتراط المنشن).\n\n"
+        "💡 يمكنك كتابة الرسالة بعد الكلمة مباشرة، أو تتركها فيسألك البوت عنها.\n\n"
+        "🔄 **سير العمل داخل المجموعة:** النداء ← كتابة الرسالة ← اختيار الفئة "
+        "(7 / 20 / 30 / 60 يوماً أو الجميع) ← زر «🏷️ طاق» ← زر «🛑 إلغاء التاغ» أثناء العمل.\n\n"
+        f"🔒 اشتراط منشن البوت قبل الكلمة: {mention_status}\n\n"
+        f"📌 **كلمات النداء الحالية:**\n{calls_text}\n\n"
+        "بالأزرار أدناه يمكنك تغيير اسم أي كلمة نداء أو حذفها أو إضافة كلمة جديدة."
+    )
+
+
+def get_tag_calls_keyboard(data):
+    calls = get_tag_calls(data)
+    rows = []
+    for i, c in enumerate(calls):
+        rows.append([
+            InlineKeyboardButton(f"✏️ تغيير: {c}", callback_data=f"tcall_edit_{i}"),
+            InlineKeyboardButton("🗑️ حذف", callback_data=f"tcall_del_{i}")
+        ])
+    rows.append([InlineKeyboardButton("➕ إضافة كلمة نداء", callback_data="tcall_add")])
+    status = "🟢" if data.get("tag_require_mention") else "🔴"
+    rows.append([InlineKeyboardButton(f"{status} اشتراط منشن البوت قبل الكلمة", callback_data="tcall_toggle_mention")])
+    rows.append([InlineKeyboardButton("♻️ استعادة الافتراضي", callback_data="tcall_reset")])
+    rows.append([InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="main_menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+def find_tag_await_key(chat_id, message_id):
+    for k, v in TAG_AWAIT.items():
+        if k[0] == chat_id and v.get("prompt_id") == message_id:
+            return k
+    return None
+
+
 # === 4.6 التاغ الجماعي على دفعات (ميزة جديدة) ===
 async def fetch_group_admins(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     """يجلب مشرفي المجموعة (غير البوتات) لتضمينهم في خيار «الجميع بدون استثناء»."""
@@ -1424,7 +1560,7 @@ def build_tag_confirm_text(period_key, members_count, custom_text):
 
 def get_tag_confirm_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀 ابدأ التاغ", callback_data="tag_go")],
+        [InlineKeyboardButton("🏷️ طاق", callback_data="tag_go")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="tag_back"),
          InlineKeyboardButton("❌ إغلاق", callback_data="tag_close")]
     ])
@@ -1438,14 +1574,65 @@ async def _edit_html(message, text, reply_markup=None):
         pass
 
 
-async def tag_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def open_tag_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int, custom_text, admins_map, edit_message_id=None):
     """
-    أمر التاغ داخل المجموعة: /تاغ [نص الرسالة]  أو  /tag [نص]  أو كلمة «تاغ» وحدها.
-    إن أُرسل بالرد على رسالة بدون نص، يُستخدم نص الرسالة المردود عليها كرسالة مرفقة بكل دفعة.
-    ينفّذه فقط مشرفو البوت ومشرفو المجموعة (يتجاهل غيرهم بصمت).
+    يعرض قائمة اختيار الفئة (7/20/30/60/الجميع). إن مُرّر edit_message_id تُحوَّل تلك الرسالة إلى القائمة،
+    وإلا تُرسل قائمة جديدة. يعيد معرّف رسالة القائمة أو None عند الفشل.
+    """
+    now_ts = time.time()
+    for k in [k for k, v in TAG_PENDING.items() if now_ts - v.get("created", 0) > TAG_PENDING_TTL]:
+        TAG_PENDING.pop(k, None)
+
+    text = build_tag_menu_text(custom_text)
+    kb = get_tag_menu_keyboard(chat_id, admins_map)
+    menu_id = None
+
+    if edit_message_id is not None:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=edit_message_id,
+                text=text,
+                parse_mode='HTML',
+                reply_markup=kb,
+                disable_web_page_preview=True
+            )
+            menu_id = edit_message_id
+        except Exception:
+            menu_id = None
+
+    if menu_id is None:
+        try:
+            menu = await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode='HTML',
+                reply_markup=kb,
+                disable_web_page_preview=True
+            )
+            menu_id = menu.message_id
+        except Exception:
+            logging.exception("فشل إرسال قائمة التاغ")
+            return None
+
+    TAG_PENDING[(chat_id, menu_id)] = {
+        "text": custom_text,
+        "admins": admins_map,
+        "period": None,
+        "created": now_ts
+    }
+    return menu_id
+
+
+async def tag_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    نداء البوت للتاغ داخل المجموعة (يعمل في group=1 بجانب فلاتر الحماية):
+      1) إن كان المشرف قد ناداه وننتظر رسالته: نلتقط أول رسالة يكتبها ونعرض قائمة الفئات.
+      2) وإلا نفحص هل الرسالة نداء (@يوزر_البوت طاق / /طاق / طاق ...) من مشرف بوت أو مشرف مجموعة.
+    كلمات النداء قابلة للتغيير من لوحة المشرفين (إعدادات منادات التاغ). غير المشرفين يُتجاهلون بصمت.
     """
     msg = update.message
-    if not msg or not msg.text or not update.effective_chat:
+    if not msg or not update.effective_chat:
         return
 
     chat = update.effective_chat
@@ -1453,15 +1640,39 @@ async def tag_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if chat.type not in ("group", "supergroup"):
         return
 
-    parts = msg.text.strip().split(None, 1)
-    first_token = parts[0]
-    # إن كان الأمر موجهاً لبوت آخر (/tag@OtherBot) نتجاهله
-    if "@" in first_token:
-        addressed = first_token.split("@", 1)[1].lower()
-        if addressed != (context.bot.username or "").lower():
-            return
-
     user = update.effective_user
+    uid = user.id if user else 0
+    text = (msg.text or "").strip()
+
+    calls, require_mention = get_tag_config()
+    rest = match_tag_trigger(text, context.bot.username, calls, require_mention) if text else None
+
+    # ---------- 1) التقاط رسالة التاغ بعد النداء ----------
+    aw_key = (chat_id, uid)
+    aw = TAG_AWAIT.get(aw_key)
+    if aw and rest is None:
+        if time.time() - aw["created"] > TAG_AWAIT_TTL:
+            TAG_AWAIT.pop(aw_key, None)
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=aw["prompt_id"])
+            except Exception:
+                pass
+        else:
+            body = (msg.text or msg.caption or "").strip()
+            if body:
+                TAG_AWAIT.pop(aw_key, None)
+                custom = body[:TAG_MESSAGE_MAX_LEN].strip() or DEFAULT_TAG_MESSAGE
+                await open_tag_menu(context, chat_id, custom, aw["admins"], edit_message_id=aw["prompt_id"])
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+                return
+
+    if rest is None:
+        return
+
+    # ---------- 2) نداء جديد للتاغ ----------
     is_anonymous_admin = bool(msg.sender_chat and msg.sender_chat.id == chat_id)
     allowed = is_anonymous_admin or bool(user and await is_group_admin(context, chat_id, user.id))
     if not allowed:
@@ -1478,38 +1689,48 @@ async def tag_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
         return
 
-    custom = parts[1].strip() if len(parts) > 1 else ""
-    if not custom and msg.reply_to_message:
-        custom = (msg.reply_to_message.text or msg.reply_to_message.caption or "").strip()
-    custom = custom[:TAG_MESSAGE_MAX_LEN].strip() or DEFAULT_TAG_MESSAGE
+    if not rest and msg.reply_to_message:
+        rest = (msg.reply_to_message.text or msg.reply_to_message.caption or "").strip()
+    rest = rest[:TAG_MESSAGE_MAX_LEN].strip()
 
     admins_map = await fetch_group_admins(context, chat_id)
 
-    # تنظيف قوائم الاختيار المنتهية
+    # تنظيف أي انتظار قديم لنفس المشرف أو منتهي الصلاحية
     now_ts = time.time()
-    for k in [k for k, v in TAG_PENDING.items() if now_ts - v.get("created", 0) > TAG_PENDING_TTL]:
-        TAG_PENDING.pop(k, None)
+    for k in [k for k, v in TAG_AWAIT.items() if now_ts - v.get("created", 0) > TAG_AWAIT_TTL]:
+        TAG_AWAIT.pop(k, None)
+    old = TAG_AWAIT.pop(aw_key, None)
+    if old:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=old["prompt_id"])
+        except Exception:
+            pass
 
-    try:
-        menu = await context.bot.send_message(
-            chat_id=chat_id,
-            text=build_tag_menu_text(custom),
-            parse_mode='HTML',
-            reply_markup=get_tag_menu_keyboard(chat_id, admins_map),
-            disable_web_page_preview=True
-        )
-    except Exception:
-        logging.exception("فشل إرسال قائمة التاغ")
-        return
+    if rest:
+        # الرسالة كُتبت مع النداء مباشرة: ننتقل لاختيار الفئة
+        await open_tag_menu(context, chat_id, rest, admins_map)
+    else:
+        mention = user_mention_html(user.id, user.first_name) if (user and not is_anonymous_admin) else "المشرف"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📢 استخدام الرسالة الافتراضية", callback_data="tag_default")],
+            [InlineKeyboardButton("❌ إلغاء", callback_data="tag_close")]
+        ])
+        try:
+            prompt = await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"✍️ <b>{mention}</b>، اكتب الآن الرسالة التي تريد إرفاقها مع كل دفعة تاغ.\n\n"
+                    f"⏳ لديك {TAG_AWAIT_TTL // 60} دقيقتان لكتابتها، أو اضغط الزر أدناه لاستخدام الرسالة الافتراضية."
+                ),
+                parse_mode='HTML',
+                reply_markup=kb
+            )
+            TAG_AWAIT[aw_key] = {"prompt_id": prompt.message_id, "admins": admins_map, "created": now_ts}
+        except Exception:
+            logging.exception("فشل إرسال طلب كتابة رسالة التاغ")
+            return
 
-    TAG_PENDING[(chat_id, menu.message_id)] = {
-        "text": custom,
-        "admins": admins_map,
-        "period": None,
-        "created": now_ts
-    }
-
-    # نحذف رسالة الأمر للحفاظ على نظافة المجموعة (إن كانت الصلاحية متاحة)
+    # نحذف رسالة النداء للحفاظ على نظافة المجموعة (إن كانت الصلاحية متاحة)
     try:
         await msg.delete()
     except Exception:
@@ -1557,14 +1778,30 @@ async def tag_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     key = (chat_id, message.message_id)
+    aw_key = find_tag_await_key(chat_id, message.message_id)
 
     if data == "tag_close":
         TAG_PENDING.pop(key, None)
+        if aw_key:
+            TAG_AWAIT.pop(aw_key, None)
         await query.answer()
         try:
             await message.delete()
         except Exception:
             pass
+        return
+
+    if data == "tag_default":
+        aw = TAG_AWAIT.pop(aw_key, None) if aw_key else None
+        if not aw or time.time() - aw["created"] > TAG_AWAIT_TTL:
+            await query.answer("⌛ انتهت صلاحية هذا الطلب، ناد البوت من جديد.", show_alert=True)
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+        await query.answer()
+        await open_tag_menu(context, chat_id, DEFAULT_TAG_MESSAGE, aw["admins"], edit_message_id=message.message_id)
         return
 
     pending = TAG_PENDING.get(key)
@@ -1831,10 +2068,11 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• شرط التنفيذ: أن يكون المنفّذ مشرفاً في البوت **ومشرفاً في المجموعة** معاً.\n"
             "• يمكنك إضافة أوامر مسح أخرى من زر «🧹 أوامر مسح الرسائل».\n\n"
             "🏷️ **التاغ الجماعي (داخل المجموعة):**\n"
-            "• `/تاغ نص الرسالة` أو `/tag نص الرسالة` : تظهر قائمة لاختيار الفئة "
-            "(آخر 7 / 20 / 30 / 60 يوماً أو الجميع).\n"
-            "• يمكنك كتابة `/تاغ` بالرد على رسالة ليُستخدم نصها كرسالة مرفقة بكل دفعة، "
-            "أو كتابة كلمة «تاغ» وحدها لاستخدام الرسالة الافتراضية.\n"
+            "• ناد البوت داخل المجموعة بمنشن يوزره ثم كلمة النداء، مثال: `@يوزر_البوت طاق` "
+            "(أو `/طاق` أو كلمة «طاق» وحدها). فيرد عليك البوت ليطلب رسالتك، ثم تختار الفئة "
+            "(آخر 7 / 20 / 30 / 60 يوماً أو الجميع)، ثم تضغط «🏷️ طاق».\n"
+            "• يمكنك كتابة الرسالة بعد الكلمة مباشرة، أو الرد بالنداء على رسالة ليُستخدم نصها.\n"
+            "• كلمات النداء قابلة للتغيير من زر «🏷️ إعدادات منادات التاغ» في هذه اللوحة.\n"
             f"• يُمنشَن {TAG_BATCH_SIZE} أعضاء في كل رسالة، ويظهر زر «🛑 إلغاء التاغ» لمشرفي البوت والمجموعة فقط.\n"
             "• يعتمد التاغ على الأعضاء الذين رصدهم البوت (آخر رسالة كتبوها)، فيبدأ الرصد من لحظة تشغيل هذه الميزة.\n\n"
             "📣 **تثبيت الإذاعة:** في آخر خطوة قبل الإرسال تختار بين «إرسال عادي» و«إرسال مع تثبيت».\n\n"
@@ -1947,6 +2185,88 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             query.message,
             "✅ تمت استعادة أوامر المسح الافتراضية.\n\n" + get_purge_text(bot_data),
             reply_markup=get_purge_keyboard(bot_data)
+        )
+
+    # ---------- إعدادات منادات التاغ (جديد) ----------
+    elif action == "manage_tag_calls":
+        WAITING_STATES[user_id] = None
+        await safe_edit_text(
+            query.message,
+            get_tag_calls_text(bot_data, context.bot.username),
+            reply_markup=get_tag_calls_keyboard(bot_data)
+        )
+
+    elif action == "tcall_add":
+        WAITING_STATES[user_id] = "add_tag_call"
+        await safe_edit_text(
+            query.message,
+            "✏️ **أرسل كلمة النداء الجديدة** (كلمة أو عبارة قصيرة حتى 20 حرفاً، بدون رموز خاصة)\n\n"
+            "مثال: إذا أرسلت `نادي` فسيصبح النداء داخل المجموعة: `@يوزر_البوت نادي`",
+            reply_markup=get_back_keyboard("manage_tag_calls")
+        )
+
+    elif action.startswith("tcall_edit_"):
+        try:
+            idx = int(action.replace("tcall_edit_", ""))
+        except ValueError:
+            idx = -1
+        calls = get_tag_calls(bot_data)
+        if 0 <= idx < len(calls):
+            WAITING_STATES[user_id] = f"edit_tag_call_{idx}"
+            await safe_edit_text(
+                query.message,
+                f"✏️ **أرسل الاسم الجديد بدل كلمة النداء** `{calls[idx]}`",
+                reply_markup=get_back_keyboard("manage_tag_calls")
+            )
+        else:
+            await safe_edit_text(query.message, get_tag_calls_text(bot_data, context.bot.username), reply_markup=get_tag_calls_keyboard(bot_data))
+
+    elif action.startswith("tcall_del_"):
+        try:
+            idx = int(action.replace("tcall_del_", ""))
+        except ValueError:
+            idx = -1
+        calls = get_tag_calls(bot_data)
+        if len(calls) <= 1:
+            await safe_edit_text(
+                query.message,
+                "⚠️ لا يمكن حذف آخر كلمة نداء متبقية. أضف كلمة جديدة أولاً ثم احذف القديمة.\n\n"
+                + get_tag_calls_text(bot_data, context.bot.username),
+                reply_markup=get_tag_calls_keyboard(bot_data)
+            )
+            return
+        if 0 <= idx < len(calls):
+            removed_call = calls.pop(idx)
+            bot_data["tag_calls"] = calls
+            save_data(bot_data)
+            invalidate_tag_cfg()
+            await safe_edit_text(
+                query.message,
+                f"✅ تم حذف كلمة النداء: {removed_call}\n\n" + get_tag_calls_text(bot_data, context.bot.username),
+                reply_markup=get_tag_calls_keyboard(bot_data)
+            )
+        else:
+            await safe_edit_text(query.message, get_tag_calls_text(bot_data, context.bot.username), reply_markup=get_tag_calls_keyboard(bot_data))
+
+    elif action == "tcall_toggle_mention":
+        bot_data["tag_require_mention"] = not bot_data.get("tag_require_mention", False)
+        save_data(bot_data)
+        invalidate_tag_cfg()
+        await safe_edit_text(
+            query.message,
+            get_tag_calls_text(bot_data, context.bot.username),
+            reply_markup=get_tag_calls_keyboard(bot_data)
+        )
+
+    elif action == "tcall_reset":
+        bot_data["tag_calls"] = list(DEFAULT_TAG_CALLS)
+        bot_data["tag_require_mention"] = False
+        save_data(bot_data)
+        invalidate_tag_cfg()
+        await safe_edit_text(
+            query.message,
+            "✅ تمت استعادة كلمات النداء الافتراضية.\n\n" + get_tag_calls_text(bot_data, context.bot.username),
+            reply_markup=get_tag_calls_keyboard(bot_data)
         )
 
     # ---------- إخراج البوت من مجموعة عبر الإشعار (جديد) ----------
@@ -2728,6 +3048,64 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=get_back_keyboard("manage_purge")
         )
 
+    # ---------- إضافة/تغيير كلمة نداء التاغ (جديد) ----------
+    elif state == "add_tag_call":
+        cmd = clean_tag_call(update.message.text or "")
+        if not cmd:
+            await update.message.reply_text(
+                "❌ كلمة غير صالحة. أرسل كلمة أو عبارة قصيرة (حتى 20 حرفاً) بدون رموز خاصة أو @ أو /، مثل: نادي\n"
+                "أو اضغط رجوع للإلغاء.",
+                reply_markup=get_back_keyboard("manage_tag_calls")
+            )
+            return
+        WAITING_STATES[user_id] = None
+        calls = get_tag_calls(bot_data)
+        if any(normalize_text_spaces(c).lower() == cmd.lower() for c in calls):
+            await update.message.reply_text("⚠️ كلمة النداء هذه موجودة بالفعل.", reply_markup=get_back_keyboard("manage_tag_calls"))
+            return
+        calls.append(cmd)
+        bot_data["tag_calls"] = calls
+        save_data(bot_data)
+        invalidate_tag_cfg()
+        await safe_reply_text(
+            update.message,
+            f"✅ تمت إضافة كلمة النداء: `{cmd}`\nاستخدمها داخل المجموعة هكذا: `@{context.bot.username} {cmd}`",
+            reply_markup=get_back_keyboard("manage_tag_calls")
+        )
+
+    elif state.startswith("edit_tag_call_"):
+        try:
+            idx = int(state.replace("edit_tag_call_", ""))
+        except ValueError:
+            idx = -1
+        calls = get_tag_calls(bot_data)
+        if not (0 <= idx < len(calls)):
+            WAITING_STATES[user_id] = None
+            await update.message.reply_text("⚠️ تعذّر تحديد كلمة النداء المراد تغييرها.", reply_markup=get_back_keyboard("manage_tag_calls"))
+            return
+        cmd = clean_tag_call(update.message.text or "")
+        if not cmd:
+            await update.message.reply_text(
+                "❌ كلمة غير صالحة. أرسل كلمة أو عبارة قصيرة (حتى 20 حرفاً) بدون رموز خاصة أو @ أو /.\n"
+                "أو اضغط رجوع للإلغاء.",
+                reply_markup=get_back_keyboard("manage_tag_calls")
+            )
+            return
+        WAITING_STATES[user_id] = None
+        if any(i != idx and normalize_text_spaces(c).lower() == cmd.lower() for i, c in enumerate(calls)):
+            await update.message.reply_text("⚠️ كلمة النداء هذه موجودة بالفعل.", reply_markup=get_back_keyboard("manage_tag_calls"))
+            return
+        old_name = calls[idx]
+        calls[idx] = cmd
+        bot_data["tag_calls"] = calls
+        save_data(bot_data)
+        invalidate_tag_cfg()
+        await safe_reply_text(
+            update.message,
+            f"✅ تم تغيير كلمة النداء من `{old_name}` إلى `{cmd}`",
+            reply_markup=get_back_keyboard("manage_tag_calls")
+        )
+
     # ---------- إضافة بوت إنلاين مسموح (جديد) ----------
     elif state == "add_inline_bot":
         raw = (update.message.text or "").strip()
@@ -3464,9 +3842,9 @@ async def main():
 
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, group_filter))
 
-    # أمر التاغ الجماعي: في مجموعة معالجات مستقلة (group=1) حتى لا يتعارض مع فلاتر الحماية في group_filter
+    # نداء التاغ الجماعي والتقاط رسالته: في مجموعة معالجات مستقلة (group=1) حتى لا يتعارض مع فلاتر الحماية
     app.add_handler(
-        MessageHandler(filters.ChatType.GROUPS & filters.Regex(TAG_CMD_REGEX), tag_command_handler),
+        MessageHandler(filters.ChatType.GROUPS & (filters.TEXT | filters.CAPTION), tag_text_handler),
         group=1
     )
 
